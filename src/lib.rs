@@ -1,14 +1,15 @@
+mod sumtree;
+
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops::RangeInclusive,
+    ops::{Add, RangeInclusive},
 };
 
 use get_size2::GetSize;
 
-use crate::sumtree::{Arena, Bias, Dimension, Item, SumTree, Summary};
-
-mod sumtree;
+pub use sumtree::Min;
+use sumtree::{Arena, Bias, Item, SumTree};
 
 #[derive(Clone, Copy)]
 struct RangeCount<T> {
@@ -56,10 +57,10 @@ impl<T: fmt::Debug> fmt::Debug for CountSummary<T> {
     }
 }
 
-impl<T: Ranged> Item for RangeCount<T> {
+impl<T: Copy> Item for RangeCount<T> {
     type Summary = CountSummary<T>;
 
-    fn summary(&self, _: &()) -> Self::Summary {
+    fn summary(&self) -> Self::Summary {
         CountSummary {
             end: self.end,
             count: self.count,
@@ -69,54 +70,55 @@ impl<T: Ranged> Item for RangeCount<T> {
     }
 }
 
-pub trait Ranged: Ord + Copy {
-    const MIN: Self;
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Key<K>(K);
+
+impl<K: Min> Min for Key<K> {
+    const MIN: Self = Self(K::MIN);
 }
 
-impl<K: Ranged> Dimension<CountSummary<K>> for K {
-    fn zero(_: &()) -> Self {
-        K::MIN
-    }
-
-    fn add_summary(&mut self, summary: CountSummary<K>, _: &()) {
-        *self = summary.end;
+impl<K> Add<CountSummary<K>> for Key<K> {
+    type Output = Self;
+    fn add(self, rhs: CountSummary<K>) -> Self::Output {
+        Key(rhs.end)
     }
 }
 
-impl<T: Ranged> Summary for CountSummary<T> {
-    type Context = ();
+impl<T: Min> Min for CountSummary<T> {
+    const MIN: Self = CountSummary {
+        end: T::MIN,
+        count: 0,
+        min_count: usize::MAX,
+        entries: 0,
+    };
+}
 
-    fn zero(_: &()) -> Self {
-        CountSummary {
-            end: T::MIN,
-            count: 0,
-            min_count: usize::MAX,
-            entries: 0,
+impl<T: Min> Add for CountSummary<T> {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            entries: self.entries + rhs.entries,
+            count: self.count + rhs.count,
+            min_count: std::cmp::min(self.min_count, rhs.min_count),
+            end: rhs.end,
         }
     }
-
-    fn add_summary(&mut self, summary: Self, _: &()) {
-        self.end = summary.end;
-        self.count += summary.count;
-        self.min_count = std::cmp::min(self.min_count, summary.min_count);
-        self.entries += summary.entries;
-    }
 }
 
-pub struct CountRangeSketch<T: Ranged> {
+pub struct CountRangeSketch<T: Copy> {
     arena: Arena<RangeCount<T>>,
     tree: SumTree<RangeCount<T>>,
     limit: usize,
-    cx: (),
 }
 
-impl<T: Ranged + fmt::Debug> fmt::Debug for CountRangeSketch<T> {
+impl<T: fmt::Debug + Copy> fmt::Debug for CountRangeSketch<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        struct Tree<'a, T: Ranged> {
+        struct Tree<'a, T: Copy> {
             arena: &'a Arena<RangeCount<T>>,
             tree: &'a SumTree<RangeCount<T>>,
         }
-        impl<T: Ranged + fmt::Debug> fmt::Debug for Tree<'_, T> {
+        impl<T: fmt::Debug + Copy> fmt::Debug for Tree<'_, T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 self.tree.fmt(f, self.arena)
             }
@@ -135,15 +137,13 @@ impl<T: Ranged + fmt::Debug> fmt::Debug for CountRangeSketch<T> {
     }
 }
 
-impl<T: Ranged> CountRangeSketch<T> {
+impl<T: Min + Copy + Ord> CountRangeSketch<T> {
     pub fn new(limit: usize) -> Self {
-        let cx = ();
         let mut arena = Arena::default();
         CountRangeSketch {
-            tree: SumTree::new(&cx, &mut arena),
+            tree: SumTree::new(&mut arena),
             arena,
             limit,
-            cx,
         }
     }
 
@@ -154,18 +154,17 @@ impl<T: Ranged> CountRangeSketch<T> {
                 assert!(self.arena.is_empty());
             }
             self.arena.clear();
-            SumTree::new(&self.cx, &mut self.arena)
+            SumTree::new(&mut self.arena)
         });
     }
 
     pub fn count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
-        let cx = &self.cx;
         let arena = &mut self.arena;
 
         let mut output = (t..=t, 1);
         replace_with::replace_with_or_abort(&mut self.tree, |tree| {
-            let mut cursor = tree.into_cursor::<T>(cx);
-            let mut new_tree = cursor.slice(&t, Bias::Left, arena);
+            let mut cursor = tree.into_cursor::<Key<T>>();
+            let mut new_tree = cursor.slice(&Key(t), Bias::Left, arena);
 
             let new_item = RangeCount {
                 count: 1,
@@ -176,22 +175,22 @@ impl<T: Ranged> CountRangeSketch<T> {
                 Some(mut item) if t >= item.start => {
                     item.count += 1;
                     output = (item.start..=item.end, item.count);
-                    new_tree = new_tree.push(item, cx, arena)
+                    new_tree = new_tree.push(item, arena)
                 }
                 Some(item) => {
-                    new_tree = new_tree.push(new_item, cx, arena).push(item, cx, arena);
+                    new_tree = new_tree.push(new_item, arena).push(item, arena);
                 }
                 None => {
-                    new_tree = new_tree.push(new_item, cx, arena);
+                    new_tree = new_tree.push(new_item, arena);
                 }
             };
 
-            new_tree.append(cursor.suffix(arena), cx, arena)
+            new_tree.append(cursor.suffix(arena), arena)
         });
 
         while self.tree.summary.entries > self.limit {
             replace_with::replace_with_or_abort(&mut self.tree, |tree| {
-                compact(tree, self.limit * 3 / 4, &self.cx, arena)
+                compact(tree, self.limit * 3 / 4, &mut self.arena)
             });
         }
 
@@ -199,10 +198,8 @@ impl<T: Ranged> CountRangeSketch<T> {
     }
 
     pub fn get_count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
-        let cx = &self.cx;
-
-        let mut cursor = self.tree.cursor::<T>(cx, &self.arena);
-        cursor.seek_forward(&t, Bias::Left, &self.arena);
+        let mut cursor = self.tree.cursor::<Key<T>>(&self.arena);
+        cursor.seek_forward(&Key(t), Bias::Left, &self.arena);
 
         if let Some(item) = cursor.item(&self.arena)
             && t >= item.start
@@ -232,17 +229,16 @@ impl<T: Ranged> CountRangeSketch<T> {
 
     pub fn get_all(&self) -> Vec<(RangeInclusive<T>, usize)> {
         self.tree
-            .items(&self.cx, &self.arena)
+            .items(&self.arena)
             .into_iter()
             .map(|item| ((item.start..=item.end), item.count))
             .collect()
     }
 }
 
-fn compact<T: Ranged>(
+fn compact<T: Copy + Min + Ord>(
     tree: SumTree<RangeCount<T>>,
     limit: usize,
-    cx: &(),
     arena: &mut Arena<RangeCount<T>>,
 ) -> SumTree<RangeCount<T>> {
     if tree.summary.entries <= limit {
@@ -253,38 +249,38 @@ fn compact<T: Ranged>(
         let CountSummary { count, end, .. } = tree.summary;
         let start = tree.first(arena).unwrap().start;
         arena.drop(tree);
-        return SumTree::from_item(RangeCount { count, start, end }, cx, arena);
+        return SumTree::from_item(RangeCount { count, start, end }, arena);
     }
 
     let midpoint = mid_count_range(&tree, arena);
 
-    let mut cursor = tree.into_cursor::<T>(cx);
-    let mut left = cursor.slice(&midpoint.end, Bias::Left, arena);
+    let mut cursor = tree.into_cursor::<Key<T>>();
+    let mut left = cursor.slice(&Key(midpoint.end), Bias::Left, arena);
 
     if left.summary.entries == 0 {
         let left_item = cursor.next(arena).unwrap();
-        let right = compact(cursor.suffix(arena), limit - 1, cx, arena);
-        return SumTree::from_item(left_item, cx, arena).append(right, cx, arena);
+        let right = compact(cursor.suffix(arena), limit - 1, arena);
+        return SumTree::from_item(left_item, arena).append(right, arena);
     }
 
     let left_limit = limit.div_ceil(2);
-    left = compact(left, left_limit, cx, arena);
+    left = compact(left, left_limit, arena);
 
     let right_limit = limit.saturating_sub(left.summary.entries);
-    let right = compact(cursor.suffix(arena), right_limit, cx, arena);
+    let right = compact(cursor.suffix(arena), right_limit, arena);
 
     let left_limit = limit.saturating_sub(right.summary.entries);
-    left = compact(left, left_limit, cx, arena);
+    left = compact(left, left_limit, arena);
 
-    left.append(right, cx, arena)
+    left.append(right, arena)
 }
 
-fn mid_count_range<T: Ranged>(
+fn mid_count_range<T: Copy + Min>(
     tree: &SumTree<RangeCount<T>>,
     arena: &Arena<RangeCount<T>>,
 ) -> CountSummary<T> {
     let summary = tree.summary;
-    let mut cursor = tree.cursor::<CountSummary<T>>(&(), arena);
+    let mut cursor = tree.cursor::<CountSummary<T>>(arena);
 
     let mut search = 0;
     cursor.search_forward(
@@ -301,19 +297,19 @@ fn mid_count_range<T: Ranged>(
 
     cursor
         .item(arena)
-        .map_or_else(|| Summary::zero(&()), |item| item.summary(&()))
+        .map_or(CountSummary::MIN, |item| item.summary())
 }
 
-impl Ranged for u64 {
+impl Min for u64 {
     const MIN: Self = Self::MIN;
 }
-impl Ranged for IpAddr {
+impl Min for IpAddr {
     const MIN: IpAddr = IpAddr::V4(Ipv4Addr::from_bits(0));
 }
-impl Ranged for Ipv4Addr {
+impl Min for Ipv4Addr {
     const MIN: Ipv4Addr = Ipv4Addr::from_bits(0);
 }
-impl Ranged for Ipv6Addr {
+impl Min for Ipv6Addr {
     const MIN: Ipv6Addr = Ipv6Addr::from_bits(0);
 }
 

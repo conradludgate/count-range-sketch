@@ -1,5 +1,6 @@
 use super::*;
 use arrayvec::ArrayVec;
+use equivalent::{Comparable, Equivalent};
 use std::{cmp::Ordering, mem};
 
 #[derive(Clone)]
@@ -24,7 +25,6 @@ pub struct Cursor<'a, T: Item, D> {
     position: D,
     did_seek: bool,
     at_end: bool,
-    cx: &'a <T::Summary as Summary>::Context,
 }
 
 // impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for Cursor<'_, T, D>
@@ -45,20 +45,16 @@ pub struct Cursor<'a, T: Item, D> {
 impl<'a, T, D> Cursor<'a, T, D>
 where
     T: Item,
-    D: Dimension<T::Summary>,
+    T::Summary: Copy,
+    D: Add<T::Summary, Output = D> + Min + Copy,
 {
-    pub fn new(
-        tree: &'a SumTree<T>,
-        cx: &'a <T::Summary as Summary>::Context,
-        arena: &Arena<T>,
-    ) -> Self {
+    pub fn new(tree: &'a SumTree<T>, arena: &Arena<T>) -> Self {
         Self {
             stack: ArrayVec::new(),
-            position: D::zero(cx),
+            position: D::MIN,
             did_seek: false,
             at_end: tree.is_empty(arena),
             tree,
-            cx,
         }
     }
 
@@ -67,7 +63,7 @@ where
         self.did_seek = false;
         self.at_end = self.tree.is_empty(arena);
         self.stack.truncate(0);
-        self.position = D::zero(self.cx);
+        self.position = D::MIN;
     }
 
     #[cfg(test)]
@@ -80,7 +76,7 @@ where
     // pub fn end(&self) -> D {
     //     if let Some(item_summary) = self.item_summary() {
     //         let mut end = *self.start();
-    //         end.add_summary(item_summary, self.cx);
+    //         end.add_summary(item_summary);
     //         end
     //     } else {
     //         *self.start()
@@ -164,7 +160,7 @@ where
                 self.stack.push(StackEntry {
                     tree: self.tree,
                     index: 0,
-                    position: D::zero(self.cx),
+                    position: D::MIN,
                 });
                 descend = true;
             }
@@ -187,8 +183,8 @@ where
                                 break;
                             } else {
                                 entry.index += 1;
-                                entry.position.add_summary(next_summary, self.cx);
-                                self.position.add_summary(next_summary, self.cx);
+                                entry.position = entry.position + next_summary;
+                                self.position = self.position + next_summary;
                             }
                         }
 
@@ -196,21 +192,21 @@ where
                     }
                     Node::Leaf { items } => {
                         if !descend {
-                            let item_summary = items[entry.index].summary(self.cx);
+                            let item_summary = items[entry.index].summary();
                             entry.index += 1;
-                            entry.position.add_summary(item_summary, self.cx);
-                            self.position.add_summary(item_summary, self.cx);
+                            entry.position = entry.position + item_summary;
+                            self.position = self.position + item_summary;
                         }
 
                         loop {
                             if let Some(item) = items.get(entry.index) {
-                                let next_item_summary = item.summary(self.cx);
+                                let next_item_summary = item.summary();
                                 if filter_node(next_item_summary) {
                                     return;
                                 } else {
                                     entry.index += 1;
-                                    entry.position.add_summary(next_item_summary, self.cx);
-                                    self.position.add_summary(next_item_summary, self.cx);
+                                    entry.position = entry.position + next_item_summary;
+                                    self.position = self.position + next_item_summary;
                                 }
                             } else {
                                 break None;
@@ -251,7 +247,7 @@ where
     #[track_caller]
     pub fn seek<Target>(&mut self, pos: &Target, bias: Bias, arena: &'a Arena<T>)
     where
-        Target: SeekTarget<T::Summary, D>,
+        Target: Comparable<D>,
     {
         self.reset(arena);
         self.seek_forward(pos, bias, arena)
@@ -260,10 +256,10 @@ where
     #[track_caller]
     pub fn seek_forward<Target>(&mut self, target: &Target, bias: Bias, arena: &'a Arena<T>)
     where
-        Target: SeekTarget<T::Summary, D>,
+        Target: Comparable<D>,
     {
         assert!(
-            target.cmp(&self.position, self.cx) >= Ordering::Equal,
+            target.compare(&self.position) >= Ordering::Equal,
             "cannot seek backward",
         );
 
@@ -272,7 +268,7 @@ where
             self.stack.push(StackEntry {
                 tree: self.tree,
                 index: 0,
-                position: D::zero(self.cx),
+                position: D::MIN,
             });
         }
 
@@ -286,10 +282,9 @@ where
                     }
 
                     for child in &child_trees[entry.index..] {
-                        let mut child_end = self.position;
-                        child_end.add_summary(child.summary, self.cx);
+                        let child_end = self.position + child.summary;
 
-                        let comparison = target.cmp(&child_end, self.cx);
+                        let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
@@ -309,10 +304,9 @@ where
                 }
                 Node::Leaf { items } => {
                     for item in &items[entry.index..] {
-                        let mut child_end = self.position;
-                        child_end.add_summary(item.summary(self.cx), self.cx);
+                        let child_end = self.position + item.summary();
 
-                        let comparison = target.cmp(&child_end, self.cx);
+                        let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
@@ -349,48 +343,48 @@ impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for StackEntryOwned<T, D> {
     }
 }
 
-pub struct IntoCursor<'a, T: Item, D> {
+pub struct IntoCursor<T: Item, D> {
     stack: ArrayVec<StackEntryOwned<T, D>, 16>,
     position: D,
-    cx: &'a <T::Summary as Summary>::Context,
 }
 
-impl<'a, T, D> IntoCursor<'a, T, D>
+impl<T, D> IntoCursor<T, D>
 where
     T: Item,
-    D: Dimension<T::Summary>,
+    T::Summary: Min + Copy + Add<Output = T::Summary>,
+    D: Add<T::Summary, Output = D> + Min + Copy,
 {
-    pub fn new(tree: SumTree<T>, cx: &'a <T::Summary as Summary>::Context) -> Self {
+    pub fn new(tree: SumTree<T>) -> Self {
         let mut stack = ArrayVec::new();
 
         stack.push(StackEntryOwned {
             tree,
-            position: D::zero(cx),
+            position: D::MIN,
         });
 
         Self {
             stack,
-            position: D::zero(cx),
-            cx,
+            position: D::MIN,
         }
     }
 
     /// Advances the cursor and returns traversed items as a tree.
     pub fn slice<Target>(&mut self, end: &Target, bias: Bias, arena: &mut Arena<T>) -> SumTree<T>
     where
-        Target: SeekTarget<T::Summary, D>,
+        Target: Comparable<D>,
+        T::Summary: Min,
     {
         let mut slice = SliceSeekAggregate {
-            tree: SumTree::new(self.cx, arena),
+            tree: SumTree::new(arena),
             leaf_items: ArrayVec::new(),
-            leaf_summary: <T::Summary as Summary>::zero(self.cx),
+            leaf_summary: Min::MIN,
         };
         self.seek_internal(end, bias, &mut slice, arena);
         slice.tree
     }
 
     pub fn suffix(mut self, arena: &mut Arena<T>) -> SumTree<T> {
-        let suffix = self.slice(&End::new(), Bias::Right, arena);
+        let suffix = self.slice(&End, Bias::Right, arena);
         debug_assert!(self.stack.is_empty());
         suffix
     }
@@ -417,7 +411,7 @@ where
                     }
 
                     let item = items.remove(0);
-                    self.position.add_summary(item.summary(self.cx), self.cx);
+                    self.position = self.position + item.summary();
 
                     break Some(item);
                 }
@@ -429,13 +423,13 @@ where
     #[track_caller]
     fn seek_internal(
         &mut self,
-        target: &dyn SeekTarget<T::Summary, D>,
+        target: &impl Comparable<D>,
         bias: Bias,
         aggregate: &mut SliceSeekAggregate<T>,
         arena: &mut Arena<T>,
     ) {
         assert!(
-            target.cmp(&self.position, self.cx) >= Ordering::Equal,
+            target.compare(&self.position) >= Ordering::Equal,
             "cannot seek backward",
         );
 
@@ -456,15 +450,14 @@ where
                     loop {
                         let Some(child) = tree_iter.next() else { break };
 
-                        let mut child_end = self.position;
-                        child_end.add_summary(child.summary, self.cx);
+                        let child_end = self.position + child.summary;
 
-                        let comparison = target.cmp(&child_end, self.cx);
+                        let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_tree(child, self.cx, arena);
+                            aggregate.push_tree(child, arena);
                             entry.position = self.position;
                         } else {
                             entry.tree = arena.alloc(
@@ -488,17 +481,16 @@ where
                     let mut items_iter = items.into_iter();
                     loop {
                         let Some(item) = items_iter.next() else { break };
-                        let summary = item.summary(self.cx);
+                        let summary = item.summary();
 
-                        let mut child_end = self.position;
-                        child_end.add_summary(summary, self.cx);
+                        let child_end = self.position + summary;
 
-                        let comparison = target.cmp(&child_end, self.cx);
+                        let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_item(item, summary, self.cx);
+                            aggregate.push_item(item, summary);
                         } else {
                             let mut items = ArrayVec::new();
 
@@ -506,12 +498,12 @@ where
                             items.extend(items_iter);
                             entry.tree = arena.alloc(summary, Node::Leaf { items });
 
-                            aggregate.end_leaf(self.cx, arena);
+                            aggregate.end_leaf(arena);
                             break 'outer;
                         }
                     }
 
-                    aggregate.end_leaf(self.cx, arena);
+                    aggregate.end_leaf(arena);
                 }
             }
 
@@ -531,9 +523,12 @@ struct SliceSeekAggregate<T: Item> {
     leaf_summary: T::Summary,
 }
 
-impl<T: Item> SliceSeekAggregate<T> {
-    fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context, arena: &mut Arena<T>) {
-        let summary = mem::replace(&mut self.leaf_summary, <T::Summary as Summary>::zero(cx));
+impl<T: Item> SliceSeekAggregate<T>
+where
+    T::Summary: Min + Copy + Add<Output = T::Summary>,
+{
+    fn end_leaf(&mut self, arena: &mut Arena<T>) {
+        let summary = mem::replace(&mut self.leaf_summary, Min::MIN);
         let leaf = arena.alloc(
             summary,
             Node::Leaf {
@@ -541,40 +536,29 @@ impl<T: Item> SliceSeekAggregate<T> {
             },
         );
 
-        replace_with::replace_with_or_abort(&mut self.tree, |tree| tree.append(leaf, cx, arena));
+        replace_with::replace_with_or_abort(&mut self.tree, |tree| tree.append(leaf, arena));
     }
 
-    fn push_item(&mut self, item: T, summary: T::Summary, cx: &<T::Summary as Summary>::Context) {
+    fn push_item(&mut self, item: T, summary: T::Summary) {
         self.leaf_items.push(item);
-        Summary::add_summary(&mut self.leaf_summary, summary, cx);
+        self.leaf_summary = self.leaf_summary + summary;
     }
 
-    fn push_tree(
-        &mut self,
-        tree: SumTree<T>,
-        cx: &<T::Summary as Summary>::Context,
-        arena: &mut Arena<T>,
-    ) {
-        replace_with::replace_with_or_abort(&mut self.tree, |agg| agg.append(tree, cx, arena));
+    fn push_tree(&mut self, tree: SumTree<T>, arena: &mut Arena<T>) {
+        replace_with::replace_with_or_abort(&mut self.tree, |agg| agg.append(tree, arena));
     }
 }
 
-struct End<D>(PhantomData<D>);
+struct End;
 
-impl<D> End<D> {
-    fn new() -> Self {
-        Self(PhantomData)
+impl<D> Equivalent<D> for End {
+    fn equivalent(&self, _: &D) -> bool {
+        false
     }
 }
 
-impl<S: Summary, D: Dimension<S>> SeekTarget<S, D> for End<D> {
-    fn cmp(&self, _: &D, _: &S::Context) -> Ordering {
+impl<D> Comparable<D> for End {
+    fn compare(&self, _: &D) -> Ordering {
         Ordering::Greater
-    }
-}
-
-impl<D> fmt::Debug for End<D> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("End").finish()
     }
 }
