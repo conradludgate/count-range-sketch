@@ -18,7 +18,6 @@ impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for StackEntry<'_, T, D> {
     }
 }
 
-#[derive(Clone)]
 pub struct Cursor<'a, T: Item, D> {
     tree: &'a SumTree<T>,
     stack: ArrayVec<StackEntry<'a, T, D>, 16>,
@@ -89,7 +88,7 @@ where
 
     /// Item is None, when the list is empty, or this cursor is at the end of the list.
     #[track_caller]
-    pub fn item(&self) -> Option<&'a T> {
+    pub fn item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
             match *entry.tree.0 {
@@ -387,26 +386,26 @@ where
 {
     #[cfg(test)]
     #[track_caller]
-    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias)
+    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias, arena: &mut Arena<T>)
     where
         Target: SeekTarget<'a, T::Summary, D>,
     {
         self.reset();
-        self.slice(pos, bias);
+        self.slice(pos, bias, arena);
     }
 
     #[cfg(test)]
     #[track_caller]
-    pub fn seek_forward<Target>(&mut self, pos: &Target, bias: Bias)
+    pub fn seek_forward<Target>(&mut self, pos: &Target, bias: Bias, arena: &mut Arena<T>)
     where
         Target: SeekTarget<'a, T::Summary, D>,
     {
-        self.slice(pos, bias);
+        self.slice(pos, bias, arena);
     }
 
     /// Advances the cursor and returns traversed items as a tree.
     #[track_caller]
-    pub fn slice<Target>(&mut self, end: &Target, bias: Bias) -> SumTree<T>
+    pub fn slice<Target>(&mut self, end: &Target, bias: Bias, arena: &mut Arena<T>) -> SumTree<T>
     where
         Target: SeekTarget<'a, T::Summary, D>,
     {
@@ -416,13 +415,13 @@ where
             leaf_item_summaries: ArrayVec::new(),
             leaf_summary: <T::Summary as Summary>::zero(self.cx),
         };
-        self.seek_internal(end, bias, &mut slice);
+        self.seek_internal(end, bias, &mut slice, arena);
         slice.tree
     }
 
     #[track_caller]
-    pub fn suffix(&mut self) -> SumTree<T> {
-        self.slice(&End::new(), Bias::Right)
+    pub fn suffix(&mut self, arena: &mut Arena<T>) -> SumTree<T> {
+        self.slice(&End::new(), Bias::Right, arena)
     }
 
     /// Returns whether we found the item you were seeking for
@@ -432,6 +431,7 @@ where
         target: &dyn SeekTarget<'a, T::Summary, D>,
         bias: Bias,
         aggregate: &mut SliceSeekAggregate<T>,
+        arena: &mut Arena<T>,
     ) -> bool {
         assert!(
             target.cmp(&self.position, self.cx) >= Ordering::Equal,
@@ -472,7 +472,7 @@ where
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_tree(child_tree, child_summary, self.cx);
+                            aggregate.push_tree(child_tree, child_summary, self.cx, arena);
                             entry.index += 1;
                             entry.position = self.position.clone();
                         } else {
@@ -508,12 +508,12 @@ where
                             aggregate.push_item(item, item_summary, self.cx);
                             entry.index += 1;
                         } else {
-                            aggregate.end_leaf(self.cx);
+                            aggregate.end_leaf(self.cx, arena);
                             break 'outer;
                         }
                     }
 
-                    aggregate.end_leaf(self.cx);
+                    aggregate.end_leaf(self.cx, arena);
                 }
             }
 
@@ -600,18 +600,16 @@ impl<'a, T: Item> Iterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T: Item, D> Iterator for Cursor<'a, T, D>
+impl<'a, T: Item, D> Cursor<'a, T, D>
 where
     D: Dimension<'a, T::Summary>,
 {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    pub fn iter_next(&mut self, arena: &'a Arena<T>) -> Option<&'a T> {
         if !self.did_seek {
             self.next();
         }
 
-        if let Some(item) = self.item() {
+        if let Some(item) = self.item(arena) {
             self.next();
             Some(item)
         } else {
@@ -629,7 +627,7 @@ struct SliceSeekAggregate<T: Item> {
 
 impl<T: Item + Clone> SliceSeekAggregate<T> {
     fn begin_leaf(&mut self) {}
-    fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context) {
+    fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context, arena: &mut Arena<T>) {
         self.tree = self.tree.clone().append(
             SumTree(Arc::new(Node::Leaf {
                 summary: mem::replace(&mut self.leaf_summary, <T::Summary as Summary>::zero(cx)),
@@ -637,6 +635,7 @@ impl<T: Item + Clone> SliceSeekAggregate<T> {
                 item_summaries: mem::take(&mut self.leaf_item_summaries),
             })),
             cx,
+            arena,
         );
     }
     fn push_item(&mut self, item: &T, summary: &T::Summary, cx: &<T::Summary as Summary>::Context) {
@@ -649,8 +648,9 @@ impl<T: Item + Clone> SliceSeekAggregate<T> {
         tree: &SumTree<T>,
         _: &T::Summary,
         cx: &<T::Summary as Summary>::Context,
+        arena: &mut Arena<T>,
     ) {
-        self.tree = self.tree.clone().append(tree.clone(), cx);
+        self.tree = self.tree.clone().append(tree.clone(), cx, arena);
     }
 }
 
