@@ -64,7 +64,7 @@ impl<K: Ranged> Dimension<CountSummary<K>> for K {
         K::MIN
     }
 
-    fn add_summary(&mut self, summary: &CountSummary<K>, _: &()) {
+    fn add_summary(&mut self, summary: CountSummary<K>, _: &()) {
         *self = summary.end;
     }
 }
@@ -81,7 +81,7 @@ impl<T: Ranged> Summary for CountSummary<T> {
         }
     }
 
-    fn add_summary(&mut self, summary: &Self, _: &()) {
+    fn add_summary(&mut self, summary: Self, _: &()) {
         self.end = summary.end;
         self.count += summary.count;
         self.min_count = std::cmp::min(self.min_count, summary.min_count);
@@ -245,7 +245,7 @@ fn mid_count_range<T: Ranged>(
     let mut cursor = tree.cursor::<CountSummary<T>>(&());
 
     let mut search = 0;
-    cursor.search_forward(|_, child| {
+    cursor.search_forward(|child| {
         if summary.count.div_ceil(2) < search + child.count {
             true
         } else {

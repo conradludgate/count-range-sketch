@@ -73,7 +73,7 @@ pub trait Summary: Copy + std::fmt::Debug {
     type Context;
 
     fn zero(cx: &Self::Context) -> Self;
-    fn add_summary(&mut self, summary: &Self, cx: &Self::Context);
+    fn add_summary(&mut self, summary: Self, cx: &Self::Context);
 }
 
 /// Each [`Summary`] type can have more than one [`Dimension`] type that it measures.
@@ -86,7 +86,7 @@ pub trait Summary: Copy + std::fmt::Debug {
 pub trait Dimension<S: Summary>: Copy {
     fn zero(cx: &S::Context) -> Self;
 
-    fn add_summary(&mut self, summary: &S, cx: &S::Context);
+    fn add_summary(&mut self, summary: S, cx: &S::Context);
 }
 
 impl<T: Summary> Dimension<T> for T {
@@ -94,7 +94,7 @@ impl<T: Summary> Dimension<T> for T {
         Summary::zero(cx)
     }
 
-    fn add_summary(&mut self, summary: &T, cx: &T::Context) {
+    fn add_summary(&mut self, summary: T, cx: &T::Context) {
         Summary::add_summary(self, summary, cx);
     }
 }
@@ -112,7 +112,7 @@ impl<S: Summary, D: Dimension<S> + Ord> SeekTarget<S, D> for D {
 impl<T: Summary> Dimension<T> for () {
     fn zero(_: &T::Context) -> Self {}
 
-    fn add_summary(&mut self, _: &T, _: &T::Context) {}
+    fn add_summary(&mut self, _: T, _: &T::Context) {}
 }
 
 /// Bias is used to settle ambiguities when determining positions in an ordered sequence.
@@ -180,7 +180,6 @@ impl<T: Item> SumTree<T> {
             summary,
             Node::Leaf {
                 items: ArrayVec::new(),
-                item_summaries: ArrayVec::new(),
             },
         )
     }
@@ -191,7 +190,6 @@ impl<T: Item> SumTree<T> {
             summary,
             Node::Leaf {
                 items: ArrayVec::from_iter(Some(item)),
-                item_summaries: ArrayVec::from_iter(Some(summary)),
             },
         )
     }
@@ -225,7 +223,7 @@ impl<T: Item> SumTree<T> {
     #[cfg(test)]
     pub fn extent<D: Dimension<T::Summary>>(&self, cx: &<T::Summary as Summary>::Context) -> D {
         let mut extent = D::zero(cx);
-        extent.add_summary(&self.summary, cx);
+        extent.add_summary(self.summary, cx);
         extent
     }
 
@@ -243,18 +241,16 @@ impl<T: Item> SumTree<T> {
         arena: &mut Arena<T>,
     ) -> Self {
         let height = left.node.height() + 1;
-        let mut child_summaries = ArrayVec::new();
-        child_summaries.push(left.summary);
-        child_summaries.push(right.summary);
+        let summary = sum([left.summary, right.summary], cx);
+
         let mut child_trees = ArrayVec::new();
         child_trees.push(left);
         child_trees.push(right);
 
         arena.alloc(
-            sum(child_summaries.iter(), cx),
+            summary,
             Node::Internal {
                 height,
-                child_summaries,
                 child_trees,
             },
         )
@@ -344,123 +340,79 @@ impl<T: Item> SumTree<T> {
         match &mut *self.node {
             Node::Internal {
                 height,
-                child_summaries,
                 child_trees,
-                ..
             } => {
-                <T::Summary as Summary>::add_summary(&mut self.summary, &other.summary, cx);
+                <T::Summary as Summary>::add_summary(&mut self.summary, other.summary, cx);
 
                 let height_delta = *height - other.node.height();
-                let mut summaries_to_append = ArrayVec::<T::Summary, { 2 * TREE_BASE }>::new();
                 let mut trees_to_append = ArrayVec::<SumTree<T>, { 2 * TREE_BASE }>::new();
                 if height_delta == 0 {
-                    let Node::Internal {
-                        child_summaries,
-                        child_trees,
-                        ..
-                    } = *other.node
-                    else {
+                    let Node::Internal { child_trees, .. } = *other.node else {
                         unreachable!()
                     };
 
-                    summaries_to_append.extend(child_summaries);
                     trees_to_append.extend(child_trees);
                 } else if height_delta == 1 && !other.node.is_underflowing() {
-                    summaries_to_append.push(other.summary);
                     trees_to_append.push(other)
                 } else {
                     let tree_to_append = child_trees
                         .last_mut()
                         .unwrap()
                         .push_tree_recursive(other, cx, arena);
-                    *child_summaries.last_mut().unwrap() = child_trees.last().unwrap().summary;
 
                     if let Some(split_tree) = tree_to_append {
-                        summaries_to_append.push(split_tree.summary);
                         trees_to_append.push(split_tree);
                     }
                 }
 
                 let child_count = child_trees.len() + trees_to_append.len();
                 if child_count > 2 * TREE_BASE {
-                    let left_summaries: ArrayVec<_, { 2 * TREE_BASE }>;
-                    let right_summaries: ArrayVec<_, { 2 * TREE_BASE }>;
-                    let left_trees;
-                    let right_trees;
-
                     let midpoint = (child_count + child_count % 2) / 2;
-                    {
-                        let mut all_summaries = child_summaries
-                            .drain(..)
-                            .chain(summaries_to_append.drain(..));
-                        left_summaries = all_summaries.by_ref().take(midpoint).collect();
-                        right_summaries = all_summaries.collect();
-                        let mut all_trees = child_trees.drain(..).chain(trees_to_append.drain(..));
-                        left_trees = all_trees.by_ref().take(midpoint).collect();
-                        right_trees = all_trees.collect();
-                    }
-                    self.summary = sum(left_summaries.iter(), cx);
-                    *child_summaries = left_summaries;
+
+                    let mut all_trees = child_trees.drain(..).chain(trees_to_append.drain(..));
+                    let left_trees: ArrayVec<_, { 2 * TREE_BASE }> =
+                        all_trees.by_ref().take(midpoint).collect();
+                    let right_trees: ArrayVec<_, { 2 * TREE_BASE }> = all_trees.collect();
+
+                    self.summary = sum(left_trees.iter().map(|tree| tree.summary), cx);
                     *child_trees = left_trees;
 
                     Some(arena.alloc(
-                        sum(right_summaries.iter(), cx),
+                        sum(right_trees.iter().map(|tree| tree.summary), cx),
                         Node::Internal {
                             height: *height,
-                            child_summaries: right_summaries,
                             child_trees: right_trees,
                         },
                     ))
                 } else {
-                    child_summaries.extend(summaries_to_append);
                     child_trees.extend(trees_to_append);
                     None
                 }
             }
-            Node::Leaf {
-                items,
-                item_summaries,
-            } => {
-                let Node::Leaf {
-                    items: other_items,
-                    item_summaries: other_summaries,
-                } = *other.node
-                else {
+            Node::Leaf { items } => {
+                let Node::Leaf { items: other_items } = *other.node else {
                     unreachable!()
                 };
 
                 let child_count = items.len() + other_items.len();
                 if child_count > 2 * TREE_BASE {
-                    let left_items;
-                    let right_items;
-                    let left_summaries;
-                    let right_summaries: ArrayVec<T::Summary, { 2 * TREE_BASE }>;
-
                     let midpoint = (child_count + child_count % 2) / 2;
-                    {
-                        let mut all_items = items.drain(..).chain(other_items);
-                        left_items = all_items.by_ref().take(midpoint).collect();
-                        right_items = all_items.collect();
 
-                        let mut all_summaries = item_summaries.drain(..).chain(other_summaries);
-                        left_summaries = all_summaries.by_ref().take(midpoint).collect();
-                        right_summaries = all_summaries.collect();
-                    }
+                    let mut all_items = items.drain(..).chain(other_items);
+                    let left_items: ArrayVec<T, { 2 * TREE_BASE }> =
+                        all_items.by_ref().take(midpoint).collect();
+                    let right_items: ArrayVec<T, { 2 * TREE_BASE }> = all_items.collect();
+
+                    self.summary = sum(left_items.iter().map(|item| item.summary(cx)), cx);
                     *items = left_items;
-                    *item_summaries = left_summaries;
-                    self.summary = sum(item_summaries.iter(), cx);
 
                     Some(arena.alloc(
-                        sum(right_summaries.iter(), cx),
-                        Node::Leaf {
-                            items: right_items,
-                            item_summaries: right_summaries,
-                        },
+                        sum(right_items.iter().map(|item| item.summary(cx)), cx),
+                        Node::Leaf { items: right_items },
                     ))
                 } else {
-                    <T::Summary as Summary>::add_summary(&mut self.summary, &other.summary, cx);
+                    <T::Summary as Summary>::add_summary(&mut self.summary, other.summary, cx);
                     items.extend(other_items);
-                    item_summaries.extend(other_summaries);
                     None
                 }
             }
@@ -502,12 +454,10 @@ impl<T: Item> DerefMut for NodeMut<'_, T> {
 enum Node<T: Item> {
     Internal {
         height: u8,
-        child_summaries: ArrayVec<T::Summary, { 2 * TREE_BASE }>,
         child_trees: ArrayVec<SumTree<T>, { 2 * TREE_BASE }>,
     },
     Leaf {
         items: ArrayVec<T, { 2 * TREE_BASE }>,
-        item_summaries: ArrayVec<T::Summary, { 2 * TREE_BASE }>,
     },
 }
 
@@ -520,24 +470,13 @@ where
         match self {
             Node::Internal {
                 height,
-                child_summaries,
                 child_trees,
             } => f
                 .debug_struct("Internal")
                 .field("height", height)
-                // .field("summary", summary)
-                .field("child_summaries", child_summaries)
                 .field("child_trees", child_trees)
                 .finish(),
-            Node::Leaf {
-                items,
-                item_summaries,
-            } => f
-                .debug_struct("Leaf")
-                // .field("summary", summary)
-                .field("items", items)
-                .field("item_summaries", item_summaries)
-                .finish(),
+            Node::Leaf { items } => f.debug_struct("Leaf").field("items", items).finish(),
         }
     }
 }
@@ -610,7 +549,7 @@ impl<T: Item> Node<T> {
 fn sum<'a, T, I>(iter: I, cx: &T::Context) -> T
 where
     T: 'a + Summary,
-    I: Iterator<Item = &'a T>,
+    I: IntoIterator<Item = T>,
 {
     let mut sum = T::zero(cx);
     for value in iter {
@@ -993,7 +932,7 @@ mod tests {
             Default::default()
         }
 
-        fn add_summary(&mut self, other: &Self, _: &()) {
+        fn add_summary(&mut self, other: Self, _: &()) {
             self.count += other.count;
             self.sum += other.sum;
             self.contains_even |= other.contains_even;
@@ -1006,7 +945,7 @@ mod tests {
             Default::default()
         }
 
-        fn add_summary(&mut self, summary: &IntegersSummary, _: &()) {
+        fn add_summary(&mut self, summary: IntegersSummary, _: &()) {
             *self = summary.max;
         }
     }
@@ -1016,7 +955,7 @@ mod tests {
             Default::default()
         }
 
-        fn add_summary(&mut self, summary: &IntegersSummary, _: &()) {
+        fn add_summary(&mut self, summary: IntegersSummary, _: &()) {
             self.0 += summary.count;
         }
     }
@@ -1032,7 +971,7 @@ mod tests {
             Default::default()
         }
 
-        fn add_summary(&mut self, summary: &IntegersSummary, _: &()) {
+        fn add_summary(&mut self, summary: IntegersSummary, _: &()) {
             self.0 += summary.sum;
         }
     }
