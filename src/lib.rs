@@ -1,5 +1,5 @@
 use std::{
-    fmt::{self, Debug},
+    fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::RangeInclusive,
 };
@@ -69,7 +69,7 @@ impl<T: Ranged> Item for RangeCount<T> {
     }
 }
 
-pub trait Ranged: Ord + Copy + Debug {
+pub trait Ranged: Ord + Copy {
     const MIN: Self;
 }
 
@@ -108,6 +108,31 @@ pub struct CountRangeSketch<T: Ranged> {
     tree: SumTree<RangeCount<T>>,
     limit: usize,
     cx: (),
+}
+
+impl<T: Ranged + fmt::Debug> fmt::Debug for CountRangeSketch<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct Tree<'a, T: Ranged> {
+            arena: &'a Arena<RangeCount<T>>,
+            tree: &'a SumTree<RangeCount<T>>,
+        }
+        impl<T: Ranged + fmt::Debug> fmt::Debug for Tree<'_, T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.tree.fmt(f, self.arena)
+            }
+        }
+
+        f.debug_struct("CountRangeSketch")
+            .field(
+                "tree",
+                &Tree {
+                    arena: &self.arena,
+                    tree: &self.tree,
+                },
+            )
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 impl<T: Ranged> CountRangeSketch<T> {
@@ -176,7 +201,7 @@ impl<T: Ranged> CountRangeSketch<T> {
     pub fn get_count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
         let cx = &self.cx;
 
-        let mut cursor = self.tree.cursor::<T>(cx);
+        let mut cursor = self.tree.cursor::<T>(cx, &self.arena);
         cursor.seek_forward(&t, Bias::Left, &self.arena);
 
         if let Some(item) = cursor.item(&self.arena)
@@ -198,7 +223,10 @@ impl<T: Ranged> CountRangeSketch<T> {
 
     pub fn full(&self) -> (RangeInclusive<T>, usize) {
         let CountSummary { count, end, .. } = self.tree.summary;
-        let start = self.tree.first().map_or(T::MIN, |item| item.start);
+        let start = self
+            .tree
+            .first(&self.arena)
+            .map_or(T::MIN, |item| item.start);
         (start..=end, count)
     }
 
@@ -223,7 +251,7 @@ fn compact<T: Ranged>(
 
     if limit <= 1 {
         let CountSummary { count, end, .. } = tree.summary;
-        let start = tree.first().unwrap().start;
+        let start = tree.first(arena).unwrap().start;
         arena.drop(tree);
         return SumTree::from_item(RangeCount { count, start, end }, cx, arena);
     }
@@ -256,17 +284,20 @@ fn mid_count_range<T: Ranged>(
     arena: &Arena<RangeCount<T>>,
 ) -> CountSummary<T> {
     let summary = tree.summary;
-    let mut cursor = tree.cursor::<CountSummary<T>>(&());
+    let mut cursor = tree.cursor::<CountSummary<T>>(&(), arena);
 
     let mut search = 0;
-    cursor.search_forward(|child| {
-        if summary.count.div_ceil(2) < search + child.count {
-            true
-        } else {
-            search += child.count;
-            false
-        }
-    });
+    cursor.search_forward(
+        |child| {
+            if summary.count.div_ceil(2) < search + child.count {
+                true
+            } else {
+                search += child.count;
+                false
+            }
+        },
+        arena,
+    );
 
     cursor
         .item(arena)
@@ -357,6 +388,75 @@ mod tests {
         assert_eq!(actual_count, count);
 
         let size = sketch.tree.get_heap_size() + sketch.arena.get_heap_size();
-        assert!(size <= 128 * LIMIT, "heap size = {size}");
+        assert!(size <= 36 * LIMIT, "heap size = {size}");
+    }
+
+    #[test]
+    fn check_debug() {
+        let mut sketch = CountRangeSketch::new(20);
+        sketch.count(1);
+        sketch.count(2);
+        sketch.count(3);
+        sketch.count(4);
+        sketch.count(5);
+        sketch.count(6);
+        sketch.count(2);
+        sketch.count(3);
+        sketch.count(4);
+        sketch.count(5);
+        sketch.count(6);
+        sketch.count(2);
+        sketch.count(3);
+        sketch.count(4);
+        sketch.count(5);
+        sketch.count(3);
+        sketch.count(4);
+
+        let expected = "CountRangeSketch {
+    tree: Internal {
+        summary: CountSummary {
+            range: ..=6,
+            count: 17,
+            len: 6,
+        },
+        height: 1,
+        children: [
+            Leaf {
+                items: [
+                    RangeCount {
+                        range: 1..=1,
+                        count: 1,
+                    },
+                    RangeCount {
+                        range: 2..=2,
+                        count: 3,
+                    },
+                    RangeCount {
+                        range: 3..=3,
+                        count: 4,
+                    },
+                ],
+            },
+            Leaf {
+                items: [
+                    RangeCount {
+                        range: 4..=4,
+                        count: 4,
+                    },
+                    RangeCount {
+                        range: 5..=5,
+                        count: 3,
+                    },
+                    RangeCount {
+                        range: 6..=6,
+                        count: 2,
+                    },
+                ],
+            },
+        ],
+    },
+    limit: 20,
+}";
+        assert_eq!(format!("{sketch:#?}"), expected);
     }
 }

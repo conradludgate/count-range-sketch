@@ -47,21 +47,25 @@ where
     T: Item,
     D: Dimension<T::Summary>,
 {
-    pub fn new(tree: &'a SumTree<T>, cx: &'a <T::Summary as Summary>::Context) -> Self {
+    pub fn new(
+        tree: &'a SumTree<T>,
+        cx: &'a <T::Summary as Summary>::Context,
+        arena: &Arena<T>,
+    ) -> Self {
         Self {
-            tree,
             stack: ArrayVec::new(),
             position: D::zero(cx),
             did_seek: false,
-            at_end: tree.is_empty(),
+            at_end: tree.is_empty(arena),
+            tree,
             cx,
         }
     }
 
     #[cfg(test)]
-    fn reset(&mut self) {
+    fn reset(&mut self, arena: &Arena<T>) {
         self.did_seek = false;
-        self.at_end = self.tree.is_empty();
+        self.at_end = self.tree.is_empty(arena);
         self.stack.truncate(0);
         self.position = D::zero(self.cx);
     }
@@ -88,7 +92,7 @@ where
     pub fn item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
-            match *entry.tree.node {
+            match *entry.tree.get(arena).into() {
                 Node::Leaf { ref items, .. } => {
                     if entry.index == items.len() {
                         None
@@ -108,14 +112,14 @@ where
     pub fn next_item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
-            if entry.index == entry.tree.node.items().len() - 1 {
-                if let Some(next_leaf) = self.next_leaf() {
-                    Some(next_leaf.node.items().first().unwrap())
+            if entry.index == entry.tree.get(arena).items().len() - 1 {
+                if let Some(next_leaf) = self.next_leaf(arena) {
+                    Some(next_leaf.into().items().first().unwrap())
                 } else {
                     None
                 }
             } else {
-                match *entry.tree.node {
+                match *entry.tree.get(arena).into() {
                     Node::Leaf { ref items, .. } => Some(&items[entry.index + 1]),
                     _ => unreachable!(),
                 }
@@ -123,19 +127,19 @@ where
         } else if self.at_end {
             None
         } else {
-            self.tree.first()
+            self.tree.first(arena)
         }
     }
 
     #[cfg(test)]
     #[track_caller]
-    fn next_leaf(&self) -> Option<&'a SumTree<T>> {
+    fn next_leaf(&self, arena: &'a Arena<T>) -> Option<NodeRef<'a, T>> {
         for entry in self.stack.iter().rev().skip(1) {
-            if entry.index < entry.tree.node.child_trees().len() - 1 {
-                match *entry.tree.node {
+            if entry.index < entry.tree.get(arena).into().child_trees().len() - 1 {
+                match *entry.tree.get(arena).into() {
                     Node::Internal {
                         ref child_trees, ..
-                    } => return Some(child_trees[entry.index + 1].leftmost_leaf()),
+                    } => return Some(child_trees[entry.index + 1].leftmost_leaf(arena)),
                     Node::Leaf { .. } => unreachable!(),
                 };
             }
@@ -144,12 +148,12 @@ where
     }
 
     #[track_caller]
-    pub fn next(&mut self) {
-        self.search_forward(|_| true)
+    pub fn next<'b: 'a>(&mut self, arena: &'b Arena<T>) {
+        self.search_forward(|_| true, arena)
     }
 
     #[track_caller]
-    pub fn search_forward<F>(&mut self, mut filter_node: F)
+    pub fn search_forward<'b: 'a, F>(&mut self, mut filter_node: F, arena: &'b Arena<T>)
     where
         F: FnMut(T::Summary) -> bool,
     {
@@ -170,7 +174,7 @@ where
         while !self.stack.is_empty() {
             let new_subtree = {
                 let entry = self.stack.last_mut().unwrap();
-                match entry.tree.node.as_ref() {
+                match entry.tree.get(arena).into() {
                     Node::Internal { child_trees, .. } => {
                         if !descend {
                             entry.index += 1;
@@ -230,7 +234,9 @@ where
         }
 
         self.at_end = self.stack.is_empty();
-        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().tree.node.is_leaf());
+        debug_assert!(
+            self.stack.is_empty() || self.stack.last().unwrap().tree.get(arena).is_leaf()
+        );
     }
 
     #[track_caller]
@@ -243,16 +249,16 @@ where
 
     #[cfg(test)]
     #[track_caller]
-    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias, arena: &Arena<T>)
+    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias, arena: &'a Arena<T>)
     where
         Target: SeekTarget<T::Summary, D>,
     {
-        self.reset();
+        self.reset(arena);
         self.seek_forward(pos, bias, arena)
     }
 
     #[track_caller]
-    pub fn seek_forward<Target>(&mut self, target: &Target, bias: Bias, arena: &Arena<T>)
+    pub fn seek_forward<Target>(&mut self, target: &Target, bias: Bias, arena: &'a Arena<T>)
     where
         Target: SeekTarget<T::Summary, D>,
     {
@@ -272,10 +278,8 @@ where
 
         let mut ascending = false;
         'outer: while let Some(entry) = self.stack.last_mut() {
-            match *entry.tree.node {
-                Node::Internal {
-                    ref child_trees, ..
-                } => {
+            match entry.tree.get(arena).into() {
+                Node::Internal { child_trees, .. } => {
                     if ascending {
                         entry.index += 1;
                         entry.position = self.position;
@@ -303,7 +307,7 @@ where
                         }
                     }
                 }
-                Node::Leaf { ref items } => {
+                Node::Leaf { items } => {
                     for item in &items[entry.index..] {
                         let mut child_end = self.position;
                         child_end.add_summary(item.summary(self.cx), self.cx);
@@ -326,7 +330,9 @@ where
         }
 
         self.at_end = self.stack.is_empty();
-        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().tree.node.is_leaf());
+        debug_assert!(
+            self.stack.is_empty() || self.stack.last().unwrap().tree.get(arena).is_leaf()
+        );
     }
 }
 
@@ -394,11 +400,8 @@ where
             let Some(entry) = self.stack.last_mut() else {
                 break None;
             };
-            match *entry.tree.node {
-                Node::Internal {
-                    ref mut child_trees,
-                    ..
-                } => {
+            match entry.tree.get_mut(arena).into() {
+                Node::Internal { child_trees, .. } => {
                     debug_assert!(!child_trees.is_empty());
 
                     let child_tree = child_trees.remove(0);
@@ -408,7 +411,7 @@ where
                         position: self.position,
                     });
                 }
-                Node::Leaf { ref mut items } => {
+                Node::Leaf { items } => {
                     if items.is_empty() {
                         break None;
                     }
@@ -438,17 +441,18 @@ where
 
         let mut ascending = false;
         'outer: while let Some(entry) = self.stack.last_mut() {
-            match *entry.tree.node {
+            let summary = entry.tree.summary;
+            match arena.0.remove(entry.tree.node).unwrap() {
                 Node::Internal {
-                    ref mut child_trees,
-                    ..
+                    height,
+                    child_trees,
                 } => {
                     if ascending {
                         entry.position = self.position;
                     }
 
-                    let mut tree_iter = child_trees.drain(..);
-                    // let mut sum_iter = child_summaries.drain(..);
+                    let mut tree_iter = child_trees.into_iter();
+
                     loop {
                         let Some(child) = tree_iter.next() else { break };
 
@@ -463,8 +467,13 @@ where
                             aggregate.push_tree(child, self.cx, arena);
                             entry.position = self.position;
                         } else {
-                            let left_trees: ArrayVec<_, 16> = tree_iter.collect();
-                            child_trees.extend(left_trees);
+                            entry.tree = arena.alloc(
+                                summary,
+                                Node::Internal {
+                                    height,
+                                    child_trees: tree_iter.collect(),
+                                },
+                            );
 
                             self.stack.push(StackEntryOwned {
                                 tree: child,
@@ -475,8 +484,8 @@ where
                         }
                     }
                 }
-                Node::Leaf { ref mut items } => {
-                    let mut items_iter = items.drain(..);
+                Node::Leaf { items } => {
+                    let mut items_iter = items.into_iter();
                     loop {
                         let Some(item) = items_iter.next() else { break };
                         let summary = item.summary(self.cx);
@@ -491,10 +500,11 @@ where
                             self.position = child_end;
                             aggregate.push_item(item, summary, self.cx);
                         } else {
-                            let left_items: ArrayVec<_, 16> = items_iter.collect();
+                            let mut items = ArrayVec::new();
 
                             items.push(item);
-                            items.extend(left_items);
+                            items.extend(items_iter);
+                            entry.tree = arena.alloc(summary, Node::Leaf { items });
 
                             aggregate.end_leaf(self.cx, arena);
                             break 'outer;
@@ -509,7 +519,9 @@ where
             ascending = true;
         }
 
-        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().tree.node.is_leaf());
+        debug_assert!(
+            self.stack.is_empty() || self.stack.last().unwrap().tree.get(arena).is_leaf()
+        );
     }
 }
 
