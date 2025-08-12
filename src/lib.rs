@@ -1,5 +1,5 @@
 use std::{
-    fmt,
+    fmt::{self, Debug},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::RangeInclusive,
 };
@@ -55,16 +55,16 @@ impl<T: Ranged> Item for RangeCount<T> {
     }
 }
 
-pub trait Ranged: Ord + Copy {
+pub trait Ranged: Ord + Copy + Debug {
     const MIN: Self;
 }
 
-impl<'a, K: Ranged> Dimension<'a, CountSummary<K>> for K {
+impl<K: Ranged> Dimension<CountSummary<K>> for K {
     fn zero(_: &()) -> Self {
         K::MIN
     }
 
-    fn add_summary(&mut self, summary: &'a CountSummary<K>, _: &()) {
+    fn add_summary(&mut self, summary: &CountSummary<K>, _: &()) {
         *self = summary.end;
     }
 }
@@ -108,45 +108,52 @@ impl<T: Ranged> CountRangeSketch<T> {
         }
     }
 
+    pub fn reset(&mut self) {
+        replace_with::replace_with_or_abort(&mut self.tree, |tree| {
+            if cfg!(debug_assertions) {
+                self.arena.drop(tree);
+                assert!(self.arena.is_empty());
+            }
+            self.arena.clear();
+            SumTree::new(&self.cx, &mut self.arena)
+        });
+    }
+
     pub fn count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
         let cx = &self.cx;
+        let arena = &mut self.arena;
 
-        let output;
-        self.tree = {
-            let mut cursor = self.tree.cursor::<T>(cx);
-            let new_tree = cursor.slice(&t, Bias::Left, &mut self.arena);
+        let mut output = (t..=t, 1);
+        replace_with::replace_with_or_abort(&mut self.tree, |tree| {
+            let mut cursor = tree.into_cursor::<T>(cx);
+            let mut new_tree = cursor.slice(&t, Bias::Left, arena);
 
-            let item = if let Some(cursor_item) = cursor.item(&self.arena)
-                && t >= cursor_item.start
-            {
-                cursor.next();
-
-                let mut item = *cursor_item;
-                item.count += 1;
-                item
-            } else {
-                RangeCount {
-                    count: 1,
-                    start: t,
-                    end: t,
+            let new_item = RangeCount {
+                count: 1,
+                start: t,
+                end: t,
+            };
+            match cursor.next(arena) {
+                Some(mut item) if t >= item.start => {
+                    item.count += 1;
+                    output = (item.start..=item.end, item.count);
+                    new_tree = new_tree.push(item, cx, arena)
+                }
+                Some(item) => {
+                    new_tree = new_tree.push(new_item, cx, arena).push(item, cx, arena);
+                }
+                None => {
+                    new_tree = new_tree.push(new_item, cx, arena);
                 }
             };
-            output = (item.start..=item.end, item.count);
 
-            new_tree.push(item, cx, &mut self.arena).append(
-                cursor.suffix(&mut self.arena),
-                cx,
-                &mut self.arena,
-            )
-        };
+            new_tree.append(cursor.suffix(arena), cx, arena)
+        });
 
-        while self.tree.summary().entries > self.limit {
-            self.tree = compact(
-                self.tree.clone(),
-                self.limit * 3 / 4,
-                &self.cx,
-                &mut self.arena,
-            );
+        while self.tree.summary.entries > self.limit {
+            replace_with::replace_with_or_abort(&mut self.tree, |tree| {
+                compact(tree, self.limit * 3 / 4, &self.cx, arena)
+            });
         }
 
         output
@@ -156,7 +163,7 @@ impl<T: Ranged> CountRangeSketch<T> {
         let cx = &self.cx;
 
         let mut cursor = self.tree.cursor::<T>(cx);
-        cursor.slice(&t, Bias::Left, &mut self.arena);
+        cursor.seek_forward(&t, Bias::Left, &self.arena);
 
         if let Some(item) = cursor.item(&self.arena)
             && t >= item.start
@@ -172,11 +179,11 @@ impl<T: Ranged> CountRangeSketch<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.tree.summary().entries
+        self.tree.summary.entries
     }
 
     pub fn full(&self) -> (RangeInclusive<T>, usize) {
-        let CountSummary { count, end, .. } = *self.tree.summary();
+        let CountSummary { count, end, .. } = self.tree.summary;
         let start = self.tree.first().map_or(T::MIN, |item| item.start);
         (start..=end, count)
     }
@@ -196,34 +203,35 @@ fn compact<T: Ranged>(
     cx: &(),
     arena: &mut Arena<RangeCount<T>>,
 ) -> SumTree<RangeCount<T>> {
-    if tree.summary().entries <= limit {
+    if tree.summary.entries <= limit {
         return tree;
     }
 
     if limit <= 1 {
-        let CountSummary { count, end, .. } = *tree.summary();
+        let CountSummary { count, end, .. } = tree.summary;
         let start = tree.first().unwrap().start;
-        return SumTree::from_item(RangeCount { count, start, end }, cx);
+        arena.drop(tree);
+        return SumTree::from_item(RangeCount { count, start, end }, cx, arena);
     }
 
     let midpoint = mid_count_range(&tree, arena);
 
-    let mut cursor = tree.cursor::<T>(cx);
+    let mut cursor = tree.into_cursor::<T>(cx);
     let mut left = cursor.slice(&midpoint.end, Bias::Left, arena);
-    let mut right = cursor.suffix(arena);
-    drop(cursor);
 
-    if left.summary().entries == 0 || right.summary().entries == 0 {
-        return tree;
+    if left.summary.entries == 0 {
+        let left_item = cursor.next(arena).unwrap();
+        let right = compact(cursor.suffix(arena), limit - 1, cx, arena);
+        return SumTree::from_item(left_item, cx, arena).append(right, cx, arena);
     }
 
     let left_limit = limit.div_ceil(2);
     left = compact(left, left_limit, cx, arena);
 
-    let right_limit = limit.saturating_sub(left.summary().entries);
-    right = compact(right, right_limit, cx, arena);
+    let right_limit = limit.saturating_sub(left.summary.entries);
+    let right = compact(cursor.suffix(arena), right_limit, cx, arena);
 
-    let left_limit = limit.saturating_sub(right.summary().entries);
+    let left_limit = limit.saturating_sub(right.summary.entries);
     left = compact(left, left_limit, cx, arena);
 
     left.append(right, cx, arena)
@@ -233,7 +241,7 @@ fn mid_count_range<T: Ranged>(
     tree: &SumTree<RangeCount<T>>,
     arena: &Arena<RangeCount<T>>,
 ) -> CountSummary<T> {
-    let summary = tree.summary();
+    let summary = tree.summary;
     let mut cursor = tree.cursor::<CountSummary<T>>(&());
 
     let mut search = 0;
@@ -278,31 +286,60 @@ mod tests {
     proptest! {
         #[test]
         fn sketch_is_accurate(s in proptest::collection::vec(RANGE, N..=N)) {
-            let mut actual = BTreeMap::<u64, usize>::new();
-            let mut sketch = CountRangeSketch::new(LIMIT);
+            check_sketch_is_accurate(s);
+        }
+    }
 
-            for &n in &s {
-                *actual.entry(n).or_default() += 1;
+    fn check_sketch_is_accurate(s: Vec<u64>) {
+        let mut actual = BTreeMap::<u64, usize>::new();
+        let mut sketch = CountRangeSketch::new(LIMIT);
 
-                let (range, count) = sketch.count(n);
-                let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
-                assert_eq!(actual_count, count);
+        for &n in &s {
+            *actual.entry(n).or_default() += 1;
 
-                assert!(sketch.len() <= LIMIT);
-            }
-
-            for n in RANGE {
-                let (range, count) = sketch.get_count(n);
-                let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
-                assert_eq!(actual_count, count);
-            }
-
-            let (range, count) = sketch.full();
-            assert_eq!(count, s.len());
-
+            let (range, count) = sketch.count(n);
             let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
             assert_eq!(actual_count, count);
 
+            assert!(sketch.len() <= LIMIT);
         }
+
+        for n in RANGE {
+            let (range, count) = sketch.get_count(n);
+            let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
+            assert_eq!(actual_count, count);
+        }
+
+        let (range, count) = sketch.full();
+        assert_eq!(count, s.len());
+
+        let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
+        assert_eq!(actual_count, count);
+
+        // reset
+        actual.clear();
+        sketch.reset();
+
+        for &n in &s {
+            *actual.entry(n).or_default() += 1;
+
+            let (range, count) = sketch.count(n);
+            let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
+            assert_eq!(actual_count, count);
+
+            assert!(sketch.len() <= LIMIT);
+        }
+
+        for n in RANGE {
+            let (range, count) = sketch.get_count(n);
+            let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
+            assert_eq!(actual_count, count);
+        }
+
+        let (range, count) = sketch.full();
+        assert_eq!(count, s.len());
+
+        let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
+        assert_eq!(actual_count, count);
     }
 }
