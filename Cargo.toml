@@ -7,6 +7,7 @@ edition = "2024"
 arrayvec = "0.7.1"
 slotmap = "1"
 replace_with = "0.1"
+get-size2 = "0.6.2"
 
 [dev-dependencies]
 rand = "0.8"

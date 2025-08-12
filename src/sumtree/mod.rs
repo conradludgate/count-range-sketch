@@ -2,6 +2,7 @@ mod cursor;
 
 use arrayvec::ArrayVec;
 pub use cursor::Cursor;
+use get_size2::GetSize;
 use slotmap::SlotMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -19,6 +20,19 @@ slotmap::new_key_type! {
 }
 
 pub struct Arena<T: Item>(SlotMap<NodeKey, Node<T>>);
+
+impl<T: Item + GetSize> GetSize for Arena<T>
+where
+    T::Summary: GetSize,
+{
+    fn get_heap_size(&self) -> usize {
+        let mut size = self.0.capacity() * size_of::<T>();
+        for node in self.0.iter() {
+            size += node.1.get_heap_size();
+        }
+        size
+    }
+}
 
 impl<T: Item> Arena<T> {
     fn alloc(&mut self, summary: T::Summary, node: Node<T>) -> SumTree<T> {
@@ -154,6 +168,15 @@ pub enum Bias {
 pub struct SumTree<T: Item> {
     node: Box<Node<T>>,
     pub summary: T::Summary,
+}
+
+impl<T: Item + GetSize> GetSize for SumTree<T>
+where
+    T::Summary: GetSize,
+{
+    fn get_heap_size(&self) -> usize {
+        self.summary.get_heap_size() + self.node.get_size()
+    }
 }
 
 impl<T> fmt::Debug for SumTree<T>
@@ -459,6 +482,20 @@ enum Node<T: Item> {
     Leaf {
         items: ArrayVec<T, { 2 * TREE_BASE }>,
     },
+}
+
+impl<T: Item + GetSize> GetSize for Node<T>
+where
+    T::Summary: GetSize,
+{
+    fn get_heap_size(&self) -> usize {
+        match self {
+            Node::Internal { child_trees, .. } => {
+                child_trees.iter().map(|tree| tree.get_heap_size()).sum()
+            }
+            Node::Leaf { items } => items.iter().map(|item| item.get_heap_size()).sum(),
+        }
+    }
 }
 
 impl<T> fmt::Debug for Node<T>

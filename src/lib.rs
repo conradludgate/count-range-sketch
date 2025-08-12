@@ -4,6 +4,8 @@ use std::{
     ops::RangeInclusive,
 };
 
+use get_size2::GetSize;
+
 use crate::sumtree::{Arena, Bias, Dimension, Item, SumTree, Summary};
 
 mod sumtree;
@@ -13,6 +15,12 @@ struct RangeCount<T> {
     count: usize,
     start: T,
     end: T,
+}
+
+impl<T: GetSize> GetSize for RangeCount<T> {
+    fn get_heap_size(&self) -> usize {
+        self.start.get_heap_size() + self.end.get_heap_size()
+    }
 }
 
 impl<T: fmt::Debug> fmt::Debug for RangeCount<T> {
@@ -30,6 +38,12 @@ struct CountSummary<T> {
     count: usize,
     min_count: usize,
     end: T,
+}
+
+impl<T: GetSize> GetSize for CountSummary<T> {
+    fn get_heap_size(&self) -> usize {
+        self.end.get_heap_size()
+    }
 }
 
 impl<T: fmt::Debug> fmt::Debug for CountSummary<T> {
@@ -278,14 +292,14 @@ mod tests {
 
     use crate::CountRangeSketch;
 
-    const LIMIT: usize = 20;
-    const RANGE: Range<u64> = 30..90;
-    const N: usize = 1000;
+    const LIMIT: usize = 100;
+    const RANGE: Range<u64> = 300..900;
 
+    use get_size2::GetSize;
     use proptest::prelude::*;
     proptest! {
         #[test]
-        fn sketch_is_accurate(s in proptest::collection::vec(RANGE, N..=N)) {
+        fn sketch_is_accurate(s in proptest::collection::vec(RANGE, 10..=5000)) {
             check_sketch_is_accurate(s);
         }
     }
@@ -341,5 +355,8 @@ mod tests {
 
         let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
         assert_eq!(actual_count, count);
+
+        let size = sketch.tree.get_heap_size() + sketch.arena.get_heap_size();
+        assert!(size <= 128 * LIMIT, "heap size = {size}");
     }
 }
