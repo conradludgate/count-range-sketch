@@ -64,6 +64,7 @@ where
         }
     }
 
+    #[cfg(test)]
     fn reset(&mut self) {
         self.did_seek = false;
         self.at_end = self.tree.is_empty();
@@ -71,20 +72,20 @@ where
         self.position = D::zero(self.cx);
     }
 
-    pub fn start(&self) -> &D {
-        &self.position
-    }
+    // pub fn start(&self) -> &D {
+    //     &self.position
+    // }
 
-    #[track_caller]
-    pub fn end(&self) -> D {
-        if let Some(item_summary) = self.item_summary() {
-            let mut end = self.start().clone();
-            end.add_summary(item_summary, self.cx);
-            end
-        } else {
-            self.start().clone()
-        }
-    }
+    // #[track_caller]
+    // pub fn end(&self) -> D {
+    //     if let Some(item_summary) = self.item_summary() {
+    //         let mut end = self.start().clone();
+    //         end.add_summary(item_summary, self.cx);
+    //         end
+    //     } else {
+    //         self.start().clone()
+    //     }
+    // }
 
     /// Item is None, when the list is empty, or this cursor is at the end of the list.
     #[track_caller]
@@ -127,6 +128,7 @@ where
         }
     }
 
+    #[cfg(test)]
     #[track_caller]
     pub fn next_item(&self) -> Option<&'a T> {
         self.assert_did_seek();
@@ -150,6 +152,7 @@ where
         }
     }
 
+    #[cfg(test)]
     #[track_caller]
     fn next_leaf(&self) -> Option<&'a SumTree<T>> {
         for entry in self.stack.iter().rev().skip(1) {
@@ -165,124 +168,125 @@ where
         None
     }
 
-    #[track_caller]
-    pub fn prev_item(&self) -> Option<&'a T> {
-        self.assert_did_seek();
-        if let Some(entry) = self.stack.last() {
-            if entry.index == 0 {
-                if let Some(prev_leaf) = self.prev_leaf() {
-                    Some(prev_leaf.0.items().last().unwrap())
-                } else {
-                    None
-                }
-            } else {
-                match *entry.tree.0 {
-                    Node::Leaf { ref items, .. } => Some(&items[entry.index - 1]),
-                    _ => unreachable!(),
-                }
-            }
-        } else if self.at_end {
-            self.tree.last()
-        } else {
-            None
-        }
-    }
+    // #[track_caller]
+    // pub fn prev_item(&self) -> Option<&'a T> {
+    //     self.assert_did_seek();
+    //     if let Some(entry) = self.stack.last() {
+    //         if entry.index == 0 {
+    //             if let Some(prev_leaf) = self.prev_leaf() {
+    //                 Some(prev_leaf.0.items().last().unwrap())
+    //             } else {
+    //                 None
+    //             }
+    //         } else {
+    //             match *entry.tree.0 {
+    //                 Node::Leaf { ref items, .. } => Some(&items[entry.index - 1]),
+    //                 _ => unreachable!(),
+    //             }
+    //         }
+    //     } else if self.at_end {
+    //         self.tree.last()
+    //     } else {
+    //         None
+    //     }
+    // }
 
-    #[track_caller]
-    fn prev_leaf(&self) -> Option<&'a SumTree<T>> {
-        for entry in self.stack.iter().rev().skip(1) {
-            if entry.index != 0 {
-                match *entry.tree.0 {
-                    Node::Internal {
-                        ref child_trees, ..
-                    } => return Some(child_trees[entry.index - 1].rightmost_leaf()),
-                    Node::Leaf { .. } => unreachable!(),
-                };
-            }
-        }
-        None
-    }
+    // #[track_caller]
+    // fn prev_leaf(&self) -> Option<&'a SumTree<T>> {
+    //     for entry in self.stack.iter().rev().skip(1) {
+    //         if entry.index != 0 {
+    //             match *entry.tree.0 {
+    //                 Node::Internal {
+    //                     ref child_trees, ..
+    //                 } => return Some(child_trees[entry.index - 1].rightmost_leaf()),
+    //                 Node::Leaf { .. } => unreachable!(),
+    //             };
+    //         }
+    //     }
+    //     None
+    // }
 
-    #[track_caller]
-    pub fn prev(&mut self) {
-        self.search_backward(|_| true)
-    }
+    // #[track_caller]
+    // pub fn prev(&mut self) {
+    //     self.search_backward(|_, _| true)
+    // }
 
-    #[track_caller]
-    pub fn search_backward<F>(&mut self, mut filter_node: F)
-    where
-        F: FnMut(&T::Summary) -> bool,
-    {
-        if !self.did_seek {
-            self.did_seek = true;
-            self.at_end = true;
-        }
+    // #[track_caller]
+    // pub fn search_backward<F>(&mut self, mut filter_node: F)
+    // where
+    //     F: FnMut(usize, &'a T::Summary) -> bool,
+    // {
+    //     if !self.did_seek {
+    //         self.did_seek = true;
+    //         self.at_end = true;
+    //     }
 
-        if self.at_end {
-            self.position = D::zero(self.cx);
-            self.at_end = self.tree.is_empty();
-            if !self.tree.is_empty() {
-                self.stack.push(StackEntry {
-                    tree: self.tree,
-                    index: self.tree.0.child_summaries().len(),
-                    position: D::from_summary(self.tree.summary(), self.cx),
-                });
-            }
-        }
+    //     if self.at_end {
+    //         self.position = D::zero(self.cx);
+    //         self.at_end = self.tree.is_empty();
+    //         if !self.tree.is_empty() {
+    //             self.stack.push(StackEntry {
+    //                 tree: self.tree,
+    //                 index: self.tree.0.child_summaries().len(),
+    //                 position: D::from_summary(self.tree.summary(), self.cx),
+    //             });
+    //         }
+    //     }
 
-        let mut descending = false;
-        while !self.stack.is_empty() {
-            if let Some(StackEntry { position, .. }) = self.stack.iter().rev().nth(1) {
-                self.position = position.clone();
-            } else {
-                self.position = D::zero(self.cx);
-            }
+    //     let mut descending = false;
+    //     while !self.stack.is_empty() {
+    //         if let Some(StackEntry { position, .. }) = self.stack.iter().rev().nth(1) {
+    //             self.position = position.clone();
+    //         } else {
+    //             self.position = D::zero(self.cx);
+    //         }
 
-            let entry = self.stack.last_mut().unwrap();
-            if !descending {
-                if entry.index == 0 {
-                    self.stack.pop();
-                    continue;
-                } else {
-                    entry.index -= 1;
-                }
-            }
+    //         let entry = self.stack.last_mut().unwrap();
+    //         if !descending {
+    //             if entry.index == 0 {
+    //                 self.stack.pop();
+    //                 continue;
+    //             } else {
+    //                 entry.index -= 1;
+    //             }
+    //         }
 
-            for summary in &entry.tree.0.child_summaries()[..entry.index] {
-                self.position.add_summary(summary, self.cx);
-            }
-            entry.position = self.position.clone();
+    //         let children = entry.tree.0.child_summaries();
+    //         for summary in &children[..entry.index] {
+    //             self.position.add_summary(summary, self.cx);
+    //         }
+    //         entry.position = self.position.clone();
 
-            descending = filter_node(&entry.tree.0.child_summaries()[entry.index]);
-            match entry.tree.0.as_ref() {
-                Node::Internal { child_trees, .. } => {
-                    if descending {
-                        let tree = &child_trees[entry.index];
-                        self.stack.push(StackEntry {
-                            position: D::zero(self.cx),
-                            tree,
-                            index: tree.0.child_summaries().len() - 1,
-                        })
-                    }
-                }
-                Node::Leaf { .. } => {
-                    if descending {
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    //         descending = filter_node(children.len(), &children[entry.index]);
+    //         match entry.tree.0.as_ref() {
+    //             Node::Internal { child_trees, .. } => {
+    //                 if descending {
+    //                     let tree = &child_trees[entry.index];
+    //                     self.stack.push(StackEntry {
+    //                         position: D::zero(self.cx),
+    //                         tree,
+    //                         index: tree.0.child_summaries().len() - 1,
+    //                     })
+    //                 }
+    //             }
+    //             Node::Leaf { .. } => {
+    //                 if descending {
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     #[track_caller]
     pub fn next(&mut self) {
-        self.search_forward(|_| true)
+        self.search_forward(|_, _| true)
     }
 
     #[track_caller]
     pub fn search_forward<F>(&mut self, mut filter_node: F)
     where
-        F: FnMut(&T::Summary) -> bool,
+        F: FnMut(usize, &'a T::Summary) -> bool,
     {
         let mut descend = false;
 
@@ -314,7 +318,7 @@ where
 
                         while entry.index < child_summaries.len() {
                             let next_summary = &child_summaries[entry.index];
-                            if filter_node(next_summary) {
+                            if filter_node(child_summaries.len(), next_summary) {
                                 break;
                             } else {
                                 entry.index += 1;
@@ -335,7 +339,7 @@ where
 
                         loop {
                             if let Some(next_item_summary) = item_summaries.get(entry.index) {
-                                if filter_node(next_item_summary) {
+                                if filter_node(item_summaries.len(), next_item_summary) {
                                     return;
                                 } else {
                                     entry.index += 1;
@@ -378,24 +382,26 @@ where
 
 impl<'a, T, D> Cursor<'a, T, D>
 where
-    T: Item,
+    T: Item + Clone,
     D: Dimension<'a, T::Summary>,
 {
+    #[cfg(test)]
     #[track_caller]
-    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias) -> bool
+    pub fn seek<Target>(&mut self, pos: &Target, bias: Bias)
     where
         Target: SeekTarget<'a, T::Summary, D>,
     {
         self.reset();
-        self.seek_internal(pos, bias, &mut ())
+        self.slice(pos, bias);
     }
 
+    #[cfg(test)]
     #[track_caller]
-    pub fn seek_forward<Target>(&mut self, pos: &Target, bias: Bias) -> bool
+    pub fn seek_forward<Target>(&mut self, pos: &Target, bias: Bias)
     where
         Target: SeekTarget<'a, T::Summary, D>,
     {
-        self.seek_internal(pos, bias, &mut ())
+        self.slice(pos, bias);
     }
 
     /// Advances the cursor and returns traversed items as a tree.
@@ -419,24 +425,13 @@ where
         self.slice(&End::new(), Bias::Right)
     }
 
-    #[track_caller]
-    pub fn summary<Target, Output>(&mut self, end: &Target, bias: Bias) -> Output
-    where
-        Target: SeekTarget<'a, T::Summary, D>,
-        Output: Dimension<'a, T::Summary>,
-    {
-        let mut summary = SummarySeekAggregate(Output::zero(self.cx));
-        self.seek_internal(end, bias, &mut summary);
-        summary.0
-    }
-
     /// Returns whether we found the item you were seeking for
     #[track_caller]
     fn seek_internal(
         &mut self,
         target: &dyn SeekTarget<'a, T::Summary, D>,
         bias: Bias,
-        aggregate: &mut dyn SeekAggregate<'a, T>,
+        aggregate: &mut SliceSeekAggregate<T>,
     ) -> bool {
         assert!(
             target.cmp(&self.position, self.cx) >= Ordering::Equal,
@@ -625,92 +620,6 @@ where
     }
 }
 
-pub struct FilterCursor<'a, F, T: Item, D> {
-    cursor: Cursor<'a, T, D>,
-    filter_node: F,
-}
-
-impl<'a, F, T: Item, D> FilterCursor<'a, F, T, D>
-where
-    F: FnMut(&T::Summary) -> bool,
-    T: Item,
-    D: Dimension<'a, T::Summary>,
-{
-    pub fn new(
-        tree: &'a SumTree<T>,
-        cx: &'a <T::Summary as Summary>::Context,
-        filter_node: F,
-    ) -> Self {
-        let cursor = tree.cursor::<D>(cx);
-        Self {
-            cursor,
-            filter_node,
-        }
-    }
-
-    pub fn start(&self) -> &D {
-        self.cursor.start()
-    }
-
-    pub fn end(&self) -> D {
-        self.cursor.end()
-    }
-
-    pub fn item(&self) -> Option<&'a T> {
-        self.cursor.item()
-    }
-
-    pub fn item_summary(&self) -> Option<&'a T::Summary> {
-        self.cursor.item_summary()
-    }
-
-    pub fn next(&mut self) {
-        self.cursor.search_forward(&mut self.filter_node);
-    }
-
-    pub fn prev(&mut self) {
-        self.cursor.search_backward(&mut self.filter_node);
-    }
-}
-
-impl<'a, F, T: Item, U> Iterator for FilterCursor<'a, F, T, U>
-where
-    F: FnMut(&T::Summary) -> bool,
-    U: Dimension<'a, T::Summary>,
-{
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.cursor.did_seek {
-            self.next();
-        }
-
-        if let Some(item) = self.item() {
-            self.cursor.search_forward(&mut self.filter_node);
-            Some(item)
-        } else {
-            None
-        }
-    }
-}
-
-trait SeekAggregate<'a, T: Item> {
-    fn begin_leaf(&mut self);
-    fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context);
-    fn push_item(
-        &mut self,
-        item: &'a T,
-        summary: &'a T::Summary,
-        cx: &<T::Summary as Summary>::Context,
-    );
-    fn push_tree(
-        &mut self,
-        tree: &'a SumTree<T>,
-        summary: &'a T::Summary,
-        cx: &<T::Summary as Summary>::Context,
-    );
-}
-
 struct SliceSeekAggregate<T: Item> {
     tree: SumTree<T>,
     leaf_items: ArrayVec<T, { 2 * TREE_BASE }>,
@@ -718,19 +627,10 @@ struct SliceSeekAggregate<T: Item> {
     leaf_summary: T::Summary,
 }
 
-struct SummarySeekAggregate<D>(D);
-
-impl<T: Item> SeekAggregate<'_, T> for () {
-    fn begin_leaf(&mut self) {}
-    fn end_leaf(&mut self, _: &<T::Summary as Summary>::Context) {}
-    fn push_item(&mut self, _: &T, _: &T::Summary, _: &<T::Summary as Summary>::Context) {}
-    fn push_tree(&mut self, _: &SumTree<T>, _: &T::Summary, _: &<T::Summary as Summary>::Context) {}
-}
-
-impl<T: Item> SeekAggregate<'_, T> for SliceSeekAggregate<T> {
+impl<T: Item + Clone> SliceSeekAggregate<T> {
     fn begin_leaf(&mut self) {}
     fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context) {
-        self.tree.append(
+        self.tree = self.tree.clone().append(
             SumTree(Arc::new(Node::Leaf {
                 summary: mem::replace(&mut self.leaf_summary, <T::Summary as Summary>::zero(cx)),
                 items: mem::take(&mut self.leaf_items),
@@ -750,26 +650,7 @@ impl<T: Item> SeekAggregate<'_, T> for SliceSeekAggregate<T> {
         _: &T::Summary,
         cx: &<T::Summary as Summary>::Context,
     ) {
-        self.tree.append(tree.clone(), cx);
-    }
-}
-
-impl<'a, T: Item, D> SeekAggregate<'a, T> for SummarySeekAggregate<D>
-where
-    D: Dimension<'a, T::Summary>,
-{
-    fn begin_leaf(&mut self) {}
-    fn end_leaf(&mut self, _: &<T::Summary as Summary>::Context) {}
-    fn push_item(&mut self, _: &T, summary: &'a T::Summary, cx: &<T::Summary as Summary>::Context) {
-        self.0.add_summary(summary, cx);
-    }
-    fn push_tree(
-        &mut self,
-        _: &SumTree<T>,
-        summary: &'a T::Summary,
-        cx: &<T::Summary as Summary>::Context,
-    ) {
-        self.0.add_summary(summary, cx);
+        self.tree = self.tree.clone().append(tree.clone(), cx);
     }
 }
 
