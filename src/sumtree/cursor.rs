@@ -331,8 +331,36 @@ where
 }
 
 struct StackEntryOwned<T: Item, D> {
-    tree: SumTree<T>,
+    node: StackEntryNode<T>,
     position: D,
+}
+
+enum StackEntryNode<T: Item> {
+    Leaf {
+        items: arrayvec::IntoIter<T, { 2 * TREE_BASE }>,
+    },
+    Internal {
+        child_trees: arrayvec::IntoIter<SumTree<T>, { 2 * TREE_BASE }>,
+    },
+}
+
+impl<T: Item> StackEntryNode<T> {
+    fn is_leaf(&self) -> bool {
+        matches!(self, Self::Leaf { .. })
+    }
+}
+
+impl<T: Item> From<Node<T>> for StackEntryNode<T> {
+    fn from(node: Node<T>) -> Self {
+        match node {
+            Node::Internal { child_trees, .. } => StackEntryNode::Internal {
+                child_trees: child_trees.into_iter(),
+            },
+            Node::Leaf { items } => StackEntryNode::Leaf {
+                items: items.into_iter(),
+            },
+        }
+    }
 }
 
 impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for StackEntryOwned<T, D> {
@@ -354,16 +382,12 @@ where
     T::Summary: Min + Copy + Add<Output = T::Summary>,
     D: Add<T::Summary, Output = D> + Min + Copy,
 {
-    pub fn new(tree: SumTree<T>) -> Self {
-        let mut stack = ArrayVec::new();
-
-        stack.push(StackEntryOwned {
-            tree,
-            position: D::MIN,
-        });
-
+    pub fn new(tree: SumTree<T>, arena: &mut Arena<T>) -> Self {
         Self {
-            stack,
+            stack: ArrayVec::from_iter([StackEntryOwned {
+                node: arena.remove(tree).into(),
+                position: D::MIN,
+            }]),
             position: D::MIN,
         }
     }
@@ -394,23 +418,16 @@ where
             let Some(entry) = self.stack.last_mut() else {
                 break None;
             };
-            match entry.tree.get_mut(arena).into() {
-                Node::Internal { child_trees, .. } => {
-                    debug_assert!(!child_trees.is_empty());
-
-                    let child_tree = child_trees.remove(0);
-
+            match &mut entry.node {
+                StackEntryNode::Internal { child_trees, .. } => {
+                    let node = arena.remove(child_trees.next().unwrap());
                     self.stack.push(StackEntryOwned {
-                        tree: child_tree,
+                        node: node.into(),
                         position: self.position,
                     });
                 }
-                Node::Leaf { items } => {
-                    if items.is_empty() {
-                        break None;
-                    }
-
-                    let item = items.remove(0);
+                StackEntryNode::Leaf { items } => {
+                    let item = items.next()?;
                     self.position = self.position + item.summary();
 
                     break Some(item);
@@ -435,21 +452,13 @@ where
 
         let mut ascending = false;
         'outer: while let Some(entry) = self.stack.last_mut() {
-            let summary = entry.tree.summary;
-            match arena.0.remove(entry.tree.node).unwrap() {
-                Node::Internal {
-                    height,
-                    child_trees,
-                } => {
+            match &mut entry.node {
+                StackEntryNode::Internal { child_trees } => {
                     if ascending {
                         entry.position = self.position;
                     }
 
-                    let mut tree_iter = child_trees.into_iter();
-
-                    loop {
-                        let Some(child) = tree_iter.next() else { break };
-
+                    while let Some(child) = child_trees.as_slice().first() {
                         let child_end = self.position + child.summary;
 
                         let comparison = target.compare(&child_end);
@@ -457,19 +466,12 @@ where
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_tree(child, arena);
+                            aggregate.push_tree(child_trees.next().unwrap(), arena);
                             entry.position = self.position;
                         } else {
-                            entry.tree = arena.alloc(
-                                summary,
-                                Node::Internal {
-                                    height,
-                                    child_trees: tree_iter.collect(),
-                                },
-                            );
-
+                            let node = arena.remove(child_trees.next().unwrap());
                             self.stack.push(StackEntryOwned {
-                                tree: child,
+                                node: node.into(),
                                 position: self.position,
                             });
                             ascending = false;
@@ -477,10 +479,8 @@ where
                         }
                     }
                 }
-                Node::Leaf { items } => {
-                    let mut items_iter = items.into_iter();
-                    loop {
-                        let Some(item) = items_iter.next() else { break };
+                StackEntryNode::Leaf { items } => {
+                    while let Some(item) = items.as_slice().first() {
                         let summary = item.summary();
 
                         let child_end = self.position + summary;
@@ -490,14 +490,8 @@ where
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_item(item, summary);
+                            aggregate.push_item(items.next().unwrap(), summary);
                         } else {
-                            let mut items = ArrayVec::new();
-
-                            items.push(item);
-                            items.extend(items_iter);
-                            entry.tree = arena.alloc(summary, Node::Leaf { items });
-
                             aggregate.end_leaf(arena);
                             break 'outer;
                         }
@@ -511,9 +505,7 @@ where
             ascending = true;
         }
 
-        debug_assert!(
-            self.stack.is_empty() || self.stack.last().unwrap().tree.get(arena).is_leaf()
-        );
+        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().node.is_leaf());
     }
 }
 

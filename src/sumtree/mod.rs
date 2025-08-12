@@ -48,6 +48,49 @@ impl<T: Item> Arena<T> {
         self.0.remove(sumtree.node).unwrap()
     }
 
+    pub fn reset(&mut self, tree: &mut SumTree<T>)
+    where
+        T: std::fmt::Debug,
+        T::Summary: Min + std::fmt::Debug + Copy + Add<Output = T::Summary>,
+    {
+        if cfg!(debug_assertions) {
+            tree.summary = Min::MIN;
+
+            let node = std::mem::replace(
+                tree.get_mut(self).into(),
+                Node::Leaf {
+                    items: ArrayVec::new(),
+                },
+            );
+            if let Node::Internal { child_trees, .. } = node {
+                child_trees.into_iter().for_each(|tree| self.drop(tree));
+            }
+
+            // for (k, v) in self.0.iter() {
+            //     if k != tree.node {
+            //         let summary = match v {
+            //             Node::Internal { child_trees, .. } => {
+            //                 sum(child_trees.iter().map(|t| t.summary))
+            //             }
+            //             Node::Leaf { items } => sum(items.iter().map(|item| item.summary())),
+            //         };
+            //         eprintln!(
+            //             "memory leak detected: {:#?}",
+            //             &NodeRef {
+            //                 arena: self,
+            //                 node: k,
+            //                 summary,
+            //             }
+            //         );
+            //     }
+            // }
+            assert_eq!(self.0.len(), 1);
+        } else {
+            self.clear();
+            *tree = SumTree::new(self);
+        }
+    }
+
     pub fn drop(&mut self, sumtree: SumTree<T>) {
         match self.remove(sumtree) {
             Node::Internal { child_trees, .. } => {
@@ -57,9 +100,9 @@ impl<T: Item> Arena<T> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
+    // pub fn is_empty(&self) -> bool {
+    //     self.0.is_empty()
+    // }
 
     pub fn clear(&mut self) {
         self.0.clear();
@@ -218,12 +261,12 @@ impl<T: Item> SumTree<T> {
         Cursor::new(self, arena)
     }
 
-    pub fn into_cursor<S>(self) -> IntoCursor<T, S>
+    pub fn into_cursor<S>(self, arena: &mut Arena<T>) -> IntoCursor<T, S>
     where
         T::Summary: Min + Copy + Add<Output = T::Summary>,
         S: Add<T::Summary, Output = S> + Min + Copy,
     {
-        IntoCursor::new(self)
+        IntoCursor::new(self, arena)
     }
 
     #[allow(dead_code)]
@@ -408,7 +451,7 @@ impl<T: Item> SumTree<T> {
                 if child_count > 2 * TREE_BASE {
                     let midpoint = (child_count + child_count % 2) / 2;
 
-                    let mut all_trees = child_trees.drain(..).chain(trees_to_append.drain(..));
+                    let mut all_trees = child_trees.into_iter().chain(trees_to_append);
                     let left_trees: ArrayVec<_, { 2 * TREE_BASE }> =
                         all_trees.by_ref().take(midpoint).collect();
                     let right_trees: ArrayVec<_, { 2 * TREE_BASE }> = all_trees.collect();
@@ -449,7 +492,7 @@ impl<T: Item> SumTree<T> {
                 if child_count > 2 * TREE_BASE {
                     let midpoint = (child_count + child_count % 2) / 2;
 
-                    let mut all_items = items.drain(..).chain(other_items);
+                    let mut all_items = items.into_iter().chain(other_items);
                     let left_items: ArrayVec<T, { 2 * TREE_BASE }> =
                         all_items.by_ref().take(midpoint).collect();
                     let right_items: ArrayVec<T, { 2 * TREE_BASE }> = all_items.collect();
@@ -726,7 +769,7 @@ mod tests {
                 reference_items.splice(splice_start..splice_end, new_items.clone());
 
                 tree = {
-                    let mut cursor = tree.into_cursor::<Count>();
+                    let mut cursor = tree.into_cursor::<Count>(&mut arena);
                     let mut new_tree = cursor.slice(&Count(splice_start), Bias::Right, &mut arena);
                     new_tree = new_tree.extend(new_items, &mut arena);
                     let _ = cursor.slice(&Count(splice_end), Bias::Right, &mut arena);

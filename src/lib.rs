@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 mod sumtree;
 
 use std::{
@@ -147,15 +149,11 @@ impl<T: Min + Copy + Ord> CountRangeSketch<T> {
         }
     }
 
-    pub fn reset(&mut self) {
-        replace_with::replace_with_or_abort(&mut self.tree, |tree| {
-            if cfg!(debug_assertions) {
-                self.arena.drop(tree);
-                assert!(self.arena.is_empty());
-            }
-            self.arena.clear();
-            SumTree::new(&mut self.arena)
-        });
+    pub fn reset(&mut self)
+    where
+        T: std::fmt::Debug,
+    {
+        self.arena.reset(&mut self.tree);
     }
 
     pub fn count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
@@ -163,7 +161,7 @@ impl<T: Min + Copy + Ord> CountRangeSketch<T> {
 
         let mut output = (t..=t, 1);
         replace_with::replace_with_or_abort(&mut self.tree, |tree| {
-            let mut cursor = tree.into_cursor::<Key<T>>();
+            let mut cursor = tree.into_cursor::<Key<T>>(arena);
             let mut new_tree = cursor.slice(&Key(t), Bias::Left, arena);
 
             let new_item = RangeCount {
@@ -254,7 +252,7 @@ fn compact<T: Copy + Min + Ord>(
 
     let midpoint = mid_count_range(&tree, arena);
 
-    let mut cursor = tree.into_cursor::<Key<T>>();
+    let mut cursor = tree.into_cursor::<Key<T>>(arena);
     let mut left = cursor.slice(&Key(midpoint.end), Bias::Left, arena);
 
     if left.summary.entries == 0 {
@@ -329,6 +327,29 @@ mod tests {
         fn sketch_is_accurate(s in proptest::collection::vec(RANGE, 10..=5000)) {
             check_sketch_is_accurate(s);
         }
+    }
+
+    #[test]
+    fn regression() {
+        check_sketch_is_accurate(vec![
+            323, 730, 746, 579, 352, 839, 598, 479, 552, 867, 472, 500, 523, 431, 593, 502, 615,
+            717, 893, 399, 715, 771, 526, 797, 891, 405, 366, 496, 490, 800, 666, 689, 712, 485,
+            882, 641, 819, 504, 880, 756, 626, 896, 413, 619, 678, 705, 325, 587, 839, 435, 572,
+            443, 602, 807, 402, 545, 371, 777, 528, 742, 872, 512, 724, 833, 701, 791, 869, 444,
+            362, 741, 561, 528, 797, 370, 820, 636, 673, 650, 559, 346, 625, 477, 336, 856, 336,
+            360, 858, 388, 843, 795, 829, 484, 762, 447, 867, 590, 767, 445, 878, 766, 413, 533,
+            485, 721, 875, 527, 312, 422, 701, 475, 762, 793, 761, 384, 466, 772, 762, 518, 365,
+            713, 815, 874, 781, 718, 600, 879, 499, 558, 786, 707, 418, 779, 569, 557, 580, 581,
+            813, 316, 723, 669, 585, 529, 512, 806, 632, 486, 573, 775, 335, 669, 847, 715, 653,
+            548, 375, 723, 476, 639, 764, 485, 876, 781, 853, 616, 897, 713, 843, 658, 690, 779,
+            846, 351, 700, 784, 847, 546, 625, 644, 708, 867, 553, 717, 497, 723, 524, 550, 688,
+            636, 805, 474, 449, 687, 374, 402, 808, 354, 787, 646, 450, 354, 811, 705, 794, 660,
+            441, 481, 730, 651, 779, 824, 613, 388, 651, 817, 501, 361, 683, 876, 748, 613, 472,
+            313, 413, 323, 765, 462, 629, 367, 810, 648, 766, 561, 382, 626, 714, 472, 503, 611,
+            875, 894, 531, 843, 800, 430, 447, 860, 722, 503, 652, 781, 694, 459, 758, 647, 688,
+            674, 699, 505, 320, 549, 502, 630, 534, 331, 811, 555, 609, 653, 815, 369, 453, 438,
+            633, 305, 646, 551, 344, 343, 666, 479, 328, 607, 714, 743, 355, 407,
+        ]);
     }
 
     fn check_sketch_is_accurate(s: Vec<u64>) {
