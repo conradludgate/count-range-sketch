@@ -27,7 +27,7 @@ impl<T: Item> Default for Arena<T> {
 /// An item that can be stored in a [`SumTree`]
 ///
 /// Must be summarized by a type that implements [`Summary`]
-pub trait Item {
+pub trait Item: Copy {
     type Summary: Summary;
 
     fn summary(&self, cx: &<Self::Summary as Summary>::Context) -> Self::Summary;
@@ -37,7 +37,7 @@ pub trait Item {
 ///
 /// Each Summary type can have multiple [`Dimension`]s that it measures,
 /// which can be used to navigate the tree
-pub trait Summary: Clone {
+pub trait Summary: Copy {
     type Context;
 
     fn zero(cx: &Self::Context) -> Self;
@@ -51,7 +51,7 @@ pub trait Summary: Clone {
 /// # Example:
 /// Zed's rope has a `TextSummary` type that summarizes lines, characters, and bytes.
 /// Each of these are different dimensions we may want to seek to
-pub trait Dimension<'a, S: Summary>: Clone {
+pub trait Dimension<'a, S: Summary>: Copy {
     fn zero(cx: &S::Context) -> Self;
 
     fn add_summary(&mut self, summary: &'a S, cx: &S::Context);
@@ -120,7 +120,7 @@ pub enum Bias {
 ///
 /// Any [`Dimension`] supported by the [`Summary`] type can be used to seek to a specific location in the tree.
 #[derive(Clone)]
-pub struct SumTree<T: Item>(Arc<Node<T>>);
+pub struct SumTree<T: Item>(Arc<Node<T>>, T::Summary);
 
 // impl<T> fmt::Debug for SumTree<T>
 // where
@@ -139,20 +139,24 @@ impl<T: Item> SumTree<T> {
 
     /// Useful in cases where the item type has a non-trivial context type, but the zero value of the summary type doesn't depend on that context.
     pub fn from_summary(summary: T::Summary, arena: &mut Arena<T>) -> Self {
-        SumTree(Arc::new(Node::Leaf {
+        SumTree(
+            Arc::new(Node::Leaf {
+                items: ArrayVec::new(),
+                item_summaries: ArrayVec::new(),
+            }),
             summary,
-            items: ArrayVec::new(),
-            item_summaries: ArrayVec::new(),
-        }))
+        )
     }
 
     pub fn from_item(item: T, cx: &<T::Summary as Summary>::Context) -> Self {
         let summary = item.summary(cx);
-        SumTree(Arc::new(Node::Leaf {
-            summary: summary.clone(),
-            items: ArrayVec::from_iter(Some(item)),
-            item_summaries: ArrayVec::from_iter(Some(summary)),
-        }))
+        SumTree(
+            Arc::new(Node::Leaf {
+                items: ArrayVec::from_iter(Some(item)),
+                item_summaries: ArrayVec::from_iter(Some(summary)),
+            }),
+            summary,
+        )
     }
 
     pub fn iter(&self) -> Iter<'_, T> {
@@ -181,19 +185,12 @@ impl<T: Item> SumTree<T> {
         cx: &<T::Summary as Summary>::Context,
     ) -> D {
         let mut extent = D::zero(cx);
-        match self.0.as_ref() {
-            Node::Internal { summary, .. } | Node::Leaf { summary, .. } => {
-                extent.add_summary(summary, cx);
-            }
-        }
+        extent.add_summary(&self.1, cx);
         extent
     }
 
     pub fn summary(&self) -> &T::Summary {
-        match self.0.as_ref() {
-            Node::Internal { summary, .. } => summary,
-            Node::Leaf { summary, .. } => summary,
-        }
+        &self.1
     }
 
     pub fn is_empty(&self) -> bool {
@@ -210,17 +207,19 @@ impl<T: Item> SumTree<T> {
     ) -> Self {
         let height = left.0.height() + 1;
         let mut child_summaries = ArrayVec::new();
-        child_summaries.push(left.0.summary().clone());
-        child_summaries.push(right.0.summary().clone());
+        child_summaries.push(*left.summary());
+        child_summaries.push(*right.summary());
         let mut child_trees = ArrayVec::new();
         child_trees.push(left);
         child_trees.push(right);
-        SumTree(Arc::new(Node::Internal {
-            height,
-            summary: sum(child_summaries.iter(), cx),
-            child_summaries,
-            child_trees,
-        }))
+        SumTree {
+            1: sum(child_summaries.iter(), cx),
+            0: Arc::new(Node::Internal {
+                height,
+                child_summaries,
+                child_trees,
+            }),
+        }
     }
 
     fn leftmost_leaf(&self) -> &Self {
@@ -305,12 +304,11 @@ impl<T: Item + Clone> SumTree<T> {
         match Arc::make_mut(&mut self.0) {
             Node::Internal {
                 height,
-                summary,
                 child_summaries,
                 child_trees,
                 ..
             } => {
-                <T::Summary as Summary>::add_summary(summary, other.0.summary(), cx);
+                <T::Summary as Summary>::add_summary(&mut self.1, other.summary(), cx);
 
                 let height_delta = *height - other.0.height();
                 let mut summaries_to_append = ArrayVec::<T::Summary, { 2 * TREE_BASE }>::new();
@@ -319,7 +317,7 @@ impl<T: Item + Clone> SumTree<T> {
                     summaries_to_append.extend(other.0.child_summaries().iter().cloned());
                     trees_to_append.extend(other.0.child_trees().iter().cloned());
                 } else if height_delta == 1 && !other.0.is_underflowing() {
-                    summaries_to_append.push(other.0.summary().clone());
+                    summaries_to_append.push(*other.summary());
                     trees_to_append.push(other)
                 } else {
                     let tree_to_append = child_trees
@@ -327,10 +325,10 @@ impl<T: Item + Clone> SumTree<T> {
                         .unwrap()
                         .push_tree_recursive(other, cx, arena);
                     *child_summaries.last_mut().unwrap() =
-                        child_trees.last().unwrap().0.summary().clone();
+                        *child_trees.last().unwrap().summary();
 
                     if let Some(split_tree) = tree_to_append {
-                        summaries_to_append.push(split_tree.0.summary().clone());
+                        summaries_to_append.push(*split_tree.summary());
                         trees_to_append.push(split_tree);
                     }
                 }
@@ -355,16 +353,18 @@ impl<T: Item + Clone> SumTree<T> {
                         left_trees = all_trees.by_ref().take(midpoint).collect();
                         right_trees = all_trees.collect();
                     }
-                    *summary = sum(left_summaries.iter(), cx);
+                    self.1 = sum(left_summaries.iter(), cx);
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
 
-                    Some(SumTree(Arc::new(Node::Internal {
-                        height: *height,
-                        summary: sum(right_summaries.iter(), cx),
-                        child_summaries: right_summaries,
-                        child_trees: right_trees,
-                    })))
+                    Some(SumTree {
+                        1: sum(right_summaries.iter(), cx),
+                        0: Arc::new(Node::Internal {
+                            height: *height,
+                            child_summaries: right_summaries,
+                            child_trees: right_trees,
+                        }),
+                    })
                 } else {
                     child_summaries.extend(summaries_to_append);
                     child_trees.extend(trees_to_append);
@@ -372,11 +372,10 @@ impl<T: Item + Clone> SumTree<T> {
                 }
             }
             Node::Leaf {
-                summary,
                 items,
                 item_summaries,
             } => {
-                let other_node = other.0;
+                let other_node = &*other.0;
 
                 let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
@@ -400,14 +399,17 @@ impl<T: Item + Clone> SumTree<T> {
                     }
                     *items = left_items;
                     *item_summaries = left_summaries;
-                    *summary = sum(item_summaries.iter(), cx);
-                    Some(SumTree(Arc::new(Node::Leaf {
-                        items: right_items,
-                        summary: sum(right_summaries.iter(), cx),
-                        item_summaries: right_summaries,
-                    })))
+                    self.1 = sum(item_summaries.iter(), cx);
+
+                    Some(SumTree {
+                        1: sum(right_summaries.iter(), cx),
+                        0: Arc::new(Node::Leaf {
+                            items: right_items,
+                            item_summaries: right_summaries,
+                        }),
+                    })
                 } else {
-                    <T::Summary as Summary>::add_summary(summary, other_node.summary(), cx);
+                    <T::Summary as Summary>::add_summary(&mut self.1, other.summary(), cx);
                     items.extend(other_node.items().iter().cloned());
                     item_summaries.extend(other_node.child_summaries().iter().cloned());
                     None
@@ -460,12 +462,10 @@ impl<T: Item> DerefMut for NodeMut<'_, T> {
 enum Node<T: Item> {
     Internal {
         height: u8,
-        summary: T::Summary,
         child_summaries: ArrayVec<T::Summary, { 2 * TREE_BASE }>,
         child_trees: ArrayVec<SumTree<T>, { 2 * TREE_BASE }>,
     },
     Leaf {
-        summary: T::Summary,
         items: ArrayVec<T, { 2 * TREE_BASE }>,
         item_summaries: ArrayVec<T::Summary, { 2 * TREE_BASE }>,
     },
@@ -516,12 +516,12 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn summary(&self) -> &T::Summary {
-        match self {
-            Node::Internal { summary, .. } => summary,
-            Node::Leaf { summary, .. } => summary,
-        }
-    }
+    // fn summary(&self) -> &T::Summary {
+    //     match self {
+    //         Node::Internal { summary, .. } => summary,
+    //         Node::Leaf { summary, .. } => summary,
+    //     }
+    // }
 
     fn child_summaries(&self) -> &[T::Summary] {
         match self {
@@ -953,7 +953,7 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Default, Debug)]
+    #[derive(Copy, Clone, Default, Debug)]
     pub struct IntegersSummary {
         count: usize,
         sum: usize,
@@ -961,10 +961,10 @@ mod tests {
         max: u8,
     }
 
-    #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
+    #[derive(Copy, Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
     struct Count(usize);
 
-    #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
+    #[derive(Copy, Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
     struct Sum(usize);
 
     impl Item for u8 {

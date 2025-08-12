@@ -312,7 +312,7 @@ where
                     } => {
                         if !descend {
                             entry.index += 1;
-                            entry.position = self.position.clone();
+                            entry.position = self.position;
                         }
 
                         while entry.index < child_summaries.len() {
@@ -358,7 +358,7 @@ where
                 self.stack.push(StackEntry {
                     tree: subtree,
                     index: 0,
-                    position: self.position.clone(),
+                    position: self.position,
                 });
             } else {
                 descend = false;
@@ -457,14 +457,14 @@ where
                 } => {
                     if ascending {
                         entry.index += 1;
-                        entry.position = self.position.clone();
+                        entry.position = self.position;
                     }
 
                     for (child_tree, child_summary) in child_trees[entry.index..]
                         .iter()
                         .zip(&child_summaries[entry.index..])
                     {
-                        let mut child_end = self.position.clone();
+                        let mut child_end = self.position;
                         child_end.add_summary(child_summary, self.cx);
 
                         let comparison = target.cmp(&child_end, self.cx);
@@ -474,12 +474,12 @@ where
                             self.position = child_end;
                             aggregate.push_tree(child_tree, child_summary, self.cx, arena);
                             entry.index += 1;
-                            entry.position = self.position.clone();
+                            entry.position = self.position;
                         } else {
                             self.stack.push(StackEntry {
                                 tree: child_tree,
                                 index: 0,
-                                position: self.position.clone(),
+                                position: self.position,
                             });
                             ascending = false;
                             continue 'outer;
@@ -497,7 +497,7 @@ where
                         .iter()
                         .zip(&item_summaries[entry.index..])
                     {
-                        let mut child_end = self.position.clone();
+                        let mut child_end = self.position;
                         child_end.add_summary(item_summary, self.cx);
 
                         let comparison = target.cmp(&child_end, self.cx);
@@ -505,7 +505,7 @@ where
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
                             self.position = child_end;
-                            aggregate.push_item(item, item_summary, self.cx);
+                            aggregate.push_item(*item, *item_summary, self.cx);
                             entry.index += 1;
                         } else {
                             aggregate.end_leaf(self.cx, arena);
@@ -630,19 +630,21 @@ impl<T: Item + Clone> SliceSeekAggregate<T> {
     fn begin_leaf(&mut self) {}
     fn end_leaf(&mut self, cx: &<T::Summary as Summary>::Context, arena: &mut Arena<T>) {
         self.tree = self.tree.clone().append(
-            SumTree(Arc::new(Node::Leaf {
-                summary: mem::replace(&mut self.leaf_summary, <T::Summary as Summary>::zero(cx)),
-                items: mem::take(&mut self.leaf_items),
-                item_summaries: mem::take(&mut self.leaf_item_summaries),
-            })),
+            SumTree {
+                1: mem::replace(&mut self.leaf_summary, <T::Summary as Summary>::zero(cx)),
+                0: Arc::new(Node::Leaf {
+                    items: mem::take(&mut self.leaf_items),
+                    item_summaries: mem::take(&mut self.leaf_item_summaries),
+                }),
+            },
             cx,
             arena,
         );
     }
-    fn push_item(&mut self, item: &T, summary: &T::Summary, cx: &<T::Summary as Summary>::Context) {
-        self.leaf_items.push(item.clone());
-        self.leaf_item_summaries.push(summary.clone());
-        Summary::add_summary(&mut self.leaf_summary, summary, cx);
+    fn push_item(&mut self, item: T, summary: T::Summary, cx: &<T::Summary as Summary>::Context) {
+        self.leaf_items.push(item);
+        self.leaf_item_summaries.push(summary);
+        Summary::add_summary(&mut self.leaf_summary, &summary, cx);
     }
     fn push_tree(
         &mut self,
