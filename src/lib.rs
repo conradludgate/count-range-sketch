@@ -99,9 +99,10 @@ pub struct CountRangeSketch<T: Ranged> {
 impl<T: Ranged> CountRangeSketch<T> {
     pub fn new(limit: usize) -> Self {
         let cx = ();
+        let mut arena = Arena::default();
         CountRangeSketch {
-            arena: Arena::default(),
-            tree: SumTree::new(&cx),
+            tree: SumTree::new(&cx, &mut arena),
+            arena,
             limit,
             cx,
         }
@@ -141,7 +142,7 @@ impl<T: Ranged> CountRangeSketch<T> {
 
         while self.tree.summary().entries > self.limit {
             self.tree = compact(
-                std::mem::take(&mut self.tree),
+                self.tree.clone(),
                 self.limit * 3 / 4,
                 &self.cx,
                 &mut self.arena,

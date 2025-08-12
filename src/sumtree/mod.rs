@@ -122,23 +122,23 @@ pub enum Bias {
 #[derive(Clone)]
 pub struct SumTree<T: Item>(Arc<Node<T>>);
 
-impl<T> fmt::Debug for SumTree<T>
-where
-    T: fmt::Debug + Item,
-    T::Summary: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("SumTree").field(&self.0).finish()
-    }
-}
+// impl<T> fmt::Debug for SumTree<T>
+// where
+//     T: fmt::Debug + Item,
+//     T::Summary: fmt::Debug,
+// {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         f.debug_tuple("SumTree").field(&self.0).finish()
+//     }
+// }
 
 impl<T: Item> SumTree<T> {
-    pub fn new(cx: &<T::Summary as Summary>::Context) -> Self {
-        SumTree::from_summary(<T::Summary as Summary>::zero(cx))
+    pub fn new(cx: &<T::Summary as Summary>::Context, arena: &mut Arena<T>) -> Self {
+        SumTree::from_summary(<T::Summary as Summary>::zero(cx), arena)
     }
 
     /// Useful in cases where the item type has a non-trivial context type, but the zero value of the summary type doesn't depend on that context.
-    pub fn from_summary(summary: T::Summary) -> Self {
+    pub fn from_summary(summary: T::Summary, arena: &mut Arena<T>) -> Self {
         SumTree(Arc::new(Node::Leaf {
             summary,
             items: ArrayVec::new(),
@@ -425,16 +425,6 @@ impl<T: Item + PartialEq> PartialEq for SumTree<T> {
 
 impl<T: Item + Eq> Eq for SumTree<T> {}
 
-impl<T, S> Default for SumTree<T>
-where
-    T: Item<Summary = S>,
-    S: Summary<Context = ()>,
-{
-    fn default() -> Self {
-        Self::new(&())
-    }
-}
-
 struct NodeRef<'a, T: Item> {
     arena: &'a Arena<T>,
     node: NodeKey,
@@ -481,38 +471,38 @@ enum Node<T: Item> {
     },
 }
 
-impl<T> fmt::Debug for Node<T>
-where
-    T: Item + fmt::Debug,
-    T::Summary: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Node::Internal {
-                height,
-                summary,
-                child_summaries,
-                child_trees,
-            } => f
-                .debug_struct("Internal")
-                .field("height", height)
-                .field("summary", summary)
-                .field("child_summaries", child_summaries)
-                .field("child_trees", child_trees)
-                .finish(),
-            Node::Leaf {
-                summary,
-                items,
-                item_summaries,
-            } => f
-                .debug_struct("Leaf")
-                .field("summary", summary)
-                .field("items", items)
-                .field("item_summaries", item_summaries)
-                .finish(),
-        }
-    }
-}
+// impl<T> fmt::Debug for Node<T>
+// where
+//     T: Item + fmt::Debug,
+//     T::Summary: fmt::Debug,
+// {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         match self {
+//             Node::Internal {
+//                 height,
+//                 summary,
+//                 child_summaries,
+//                 child_trees,
+//             } => f
+//                 .debug_struct("Internal")
+//                 .field("height", height)
+//                 .field("summary", summary)
+//                 .field("child_summaries", child_summaries)
+//                 .field("child_trees", child_trees)
+//                 .finish(),
+//             Node::Leaf {
+//                 summary,
+//                 items,
+//                 item_summaries,
+//             } => f
+//                 .debug_struct("Leaf")
+//                 .field("summary", summary)
+//                 .field("items", items)
+//                 .field("item_summaries", item_summaries)
+//                 .finish(),
+//         }
+//     }
+// }
 
 impl<T: Item> Node<T> {
     fn is_leaf(&self) -> bool {
@@ -585,15 +575,15 @@ mod tests {
     #[test]
     fn test_extend_and_push_tree() {
         let mut arena = Arena::default();
-        let mut tree1 = SumTree::default();
+        let mut tree1 = SumTree::new(&(), &mut arena);
         tree1 = tree1.extend(0..20, &(), &mut arena);
 
-        let mut tree2 = SumTree::default();
+        let mut tree2 = SumTree::new(&(), &mut arena);
         tree2 = tree2.extend(50..100, &(), &mut arena);
 
         tree1 = tree1.append(tree2, &(), &mut arena);
         assert_eq!(
-            tree1.items(&(), &mut arena),
+            tree1.items(&(), &arena),
             (0..20).chain(50..100).collect::<Vec<u8>>()
         );
     }
@@ -617,7 +607,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(dbg!(seed));
 
             let rng = &mut rng;
-            let mut tree = SumTree::<u8>::default();
+            let mut tree = SumTree::<u8>::new(&(), &mut arena);
             let count = rng.gen_range(0..10);
             tree = tree.extend(
                 rng.sample_iter(distributions::Standard).take(count),
@@ -679,11 +669,11 @@ mod tests {
                     }
 
                     if before_start {
-                        assert_eq!(cursor.next_item(), reference_items.first());
+                        assert_eq!(cursor.next_item(&arena), reference_items.first());
                     } else if pos + 1 < reference_items.len() {
-                        assert_eq!(cursor.next_item().unwrap(), &reference_items[pos + 1]);
+                        assert_eq!(cursor.next_item(&arena).unwrap(), &reference_items[pos + 1]);
                     } else {
-                        assert_eq!(cursor.next_item(), None);
+                        assert_eq!(cursor.next_item(&arena), None);
                     }
 
                     if i < 5 {
@@ -725,189 +715,189 @@ mod tests {
         let mut arena = Arena::default();
 
         // Empty tree
-        let tree = SumTree::<u8>::default();
+        let tree = SumTree::<u8>::new(&(), &mut arena);
         let mut cursor = tree.cursor::<IntegersSummary>(&());
         assert_eq!(
             cursor
                 .slice(&Count(0), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             Vec::<u8>::new()
         );
-        assert_eq!(cursor.item(&mut arena), None);
+        assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), None);
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 0);
         // cursor.prev();
         // assert_eq!(cursor.item(), None);
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), None);
+        // assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 0);
         // cursor.next();
         // assert_eq!(cursor.item(), None);
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), None);
+        // assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 0);
 
         // Single-element tree
-        let tree = SumTree::<u8>::default().extend(vec![1], &(), &mut arena);
+        let tree = SumTree::<u8>::new(&(), &mut arena).extend(vec![1], &(), &mut arena);
         let mut cursor = tree.cursor::<IntegersSummary>(&());
         assert_eq!(
             cursor
                 .slice(&Count(0), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             Vec::<u8>::new()
         );
-        assert_eq!(cursor.item(&mut arena), Some(&1));
+        assert_eq!(cursor.item(&arena), Some(&1));
         // assert_eq!(cursor.prev_item(), None);
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 0);
 
         cursor.next();
-        assert_eq!(cursor.item(&mut arena), None);
+        assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&1));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 1);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&1));
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), None);
+        // assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 0);
 
         let mut cursor = tree.cursor::<IntegersSummary>(&());
         assert_eq!(
             cursor
                 .slice(&Count(1), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             [1]
         );
-        assert_eq!(cursor.item(&mut arena), None);
+        assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&1));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 1);
 
         cursor.seek(&Count(0), Bias::Right, &mut arena);
         assert_eq!(
             cursor
                 .slice(&tree.extent::<Count>(&()), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             [1]
         );
-        assert_eq!(cursor.item(&mut arena), None);
+        assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&1));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 1);
 
         // Multiple-element tree
-        let tree = SumTree::default().extend(vec![1, 2, 3, 4, 5, 6], &(), &mut arena);
+        let tree = SumTree::new(&(), &mut arena).extend(vec![1, 2, 3, 4, 5, 6], &(), &mut arena);
         let mut cursor = tree.cursor::<IntegersSummary>(&());
 
         assert_eq!(
             cursor
                 .slice(&Count(2), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             [1, 2]
         );
-        assert_eq!(cursor.item(&mut arena), Some(&3));
+        assert_eq!(cursor.item(&arena), Some(&3));
         // assert_eq!(cursor.prev_item(), Some(&2));
-        assert_eq!(cursor.next_item(), Some(&4));
+        assert_eq!(cursor.next_item(&arena), Some(&4));
         // assert_eq!(cursor.start().sum, 3);
 
         cursor.next();
         assert_eq!(cursor.item(&arena), Some(&4));
         // assert_eq!(cursor.prev_item(), Some(&3));
-        assert_eq!(cursor.next_item(), Some(&5));
+        assert_eq!(cursor.next_item(&arena), Some(&5));
         // assert_eq!(cursor.start().sum, 6);
 
         cursor.next();
         assert_eq!(cursor.item(&arena), Some(&5));
         // assert_eq!(cursor.prev_item(), Some(&4));
-        assert_eq!(cursor.next_item(), Some(&6));
+        assert_eq!(cursor.next_item(&arena), Some(&6));
         // assert_eq!(cursor.start().sum, 10);
 
         cursor.next();
         assert_eq!(cursor.item(&arena), Some(&6));
         // assert_eq!(cursor.prev_item(), Some(&5));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 15);
 
         cursor.next();
         cursor.next();
         assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&6));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 21);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&6));
         // assert_eq!(cursor.prev_item(), Some(&5));
-        // assert_eq!(cursor.next_item(), None);
+        // assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 15);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&5));
         // assert_eq!(cursor.prev_item(), Some(&4));
-        // assert_eq!(cursor.next_item(), Some(&6));
+        // assert_eq!(cursor.next_item(&arena), Some(&6));
         // assert_eq!(cursor.start().sum, 10);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&4));
         // assert_eq!(cursor.prev_item(), Some(&3));
-        // assert_eq!(cursor.next_item(), Some(&5));
+        // assert_eq!(cursor.next_item(&arena), Some(&5));
         // assert_eq!(cursor.start().sum, 6);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&3));
         // assert_eq!(cursor.prev_item(), Some(&2));
-        // assert_eq!(cursor.next_item(), Some(&4));
+        // assert_eq!(cursor.next_item(&arena), Some(&4));
         // assert_eq!(cursor.start().sum, 3);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&2));
         // assert_eq!(cursor.prev_item(), Some(&1));
-        // assert_eq!(cursor.next_item(), Some(&3));
+        // assert_eq!(cursor.next_item(&arena), Some(&3));
         // assert_eq!(cursor.start().sum, 1);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), Some(&1));
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), Some(&2));
+        // assert_eq!(cursor.next_item(&arena), Some(&2));
         // assert_eq!(cursor.start().sum, 0);
 
         // cursor.prev();
         // assert_eq!(cursor.item(), None);
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), Some(&1));
+        // assert_eq!(cursor.next_item(&arena), Some(&1));
         // assert_eq!(cursor.start().sum, 0);
 
         // cursor.next();
         // assert_eq!(cursor.item(), Some(&1));
         // assert_eq!(cursor.prev_item(), None);
-        // assert_eq!(cursor.next_item(), Some(&2));
+        // assert_eq!(cursor.next_item(&arena), Some(&2));
         // assert_eq!(cursor.start().sum, 0);
 
         let mut cursor = tree.cursor::<IntegersSummary>(&());
         assert_eq!(
             cursor
                 .slice(&tree.extent::<Count>(&()), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
-            tree.items(&(), &mut arena)
+                .items(&(), &arena),
+            tree.items(&(), &arena)
         );
         assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&6));
-        // assert_eq!(cursor.next_item(), None);
+        // assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 21);
 
         cursor.seek(&Count(3), Bias::Right, &mut arena);
         assert_eq!(
             cursor
                 .slice(&tree.extent::<Count>(&()), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             [4, 5, 6]
         );
         assert_eq!(cursor.item(&arena), None);
         // assert_eq!(cursor.prev_item(), Some(&6));
-        assert_eq!(cursor.next_item(), None);
+        assert_eq!(cursor.next_item(&arena), None);
         // assert_eq!(cursor.start().sum, 21);
 
         // Seeking can bias left or right
@@ -921,19 +911,19 @@ mod tests {
         assert_eq!(
             cursor
                 .slice(&Count(3), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             vec![2, 3]
         );
         assert_eq!(
             cursor
                 .slice(&Count(6), Bias::Left, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             vec![4, 5]
         );
         assert_eq!(
             cursor
                 .slice(&Count(6), Bias::Right, &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             vec![6]
         );
     }
@@ -942,9 +932,9 @@ mod tests {
     fn test_from_iter() {
         let mut arena = Arena::default();
         assert_eq!(
-            SumTree::new(&())
+            SumTree::new(&(), &mut arena)
                 .extend(0..100, &(), &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             (0..100).collect::<Vec<_>>()
         );
 
@@ -956,9 +946,9 @@ mod tests {
             if ix == 1 { Some(1) } else { None }
         });
         assert_eq!(
-            SumTree::new(&())
+            SumTree::new(&(), &mut arena)
                 .extend(iterator, &(), &mut arena)
-                .items(&(), &mut arena),
+                .items(&(), &arena),
             vec![1]
         );
     }

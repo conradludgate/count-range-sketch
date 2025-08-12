@@ -27,20 +27,20 @@ pub struct Cursor<'a, T: Item, D> {
     cx: &'a <T::Summary as Summary>::Context,
 }
 
-impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for Cursor<'_, T, D>
-where
-    T::Summary: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Cursor")
-            .field("tree", &self.tree)
-            .field("stack", &self.stack)
-            .field("position", &self.position)
-            .field("did_seek", &self.did_seek)
-            .field("at_end", &self.at_end)
-            .finish()
-    }
-}
+// impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for Cursor<'_, T, D>
+// where
+//     T::Summary: fmt::Debug,
+// {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         f.debug_struct("Cursor")
+//             .field("tree", &self.tree)
+//             .field("stack", &self.stack)
+//             .field("position", &self.position)
+//             .field("did_seek", &self.did_seek)
+//             .field("at_end", &self.at_end)
+//             .finish()
+//     }
+// }
 
 pub struct Iter<'a, T: Item> {
     tree: &'a SumTree<T>,
@@ -129,7 +129,7 @@ where
 
     #[cfg(test)]
     #[track_caller]
-    pub fn next_item(&self) -> Option<&'a T> {
+    pub fn next_item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
             if entry.index == entry.tree.0.items().len() - 1 {
@@ -410,7 +410,7 @@ where
         Target: SeekTarget<'a, T::Summary, D>,
     {
         let mut slice = SliceSeekAggregate {
-            tree: SumTree::new(self.cx),
+            tree: SumTree::new(self.cx, arena),
             leaf_items: ArrayVec::new(),
             leaf_item_summaries: ArrayVec::new(),
             leaf_summary: <T::Summary as Summary>::zero(self.cx),
@@ -604,6 +604,7 @@ impl<'a, T: Item, D> Cursor<'a, T, D>
 where
     D: Dimension<'a, T::Summary>,
 {
+    #[cfg(test)]
     pub fn iter_next(&mut self, arena: &'a Arena<T>) -> Option<&'a T> {
         if !self.did_seek {
             self.next();
