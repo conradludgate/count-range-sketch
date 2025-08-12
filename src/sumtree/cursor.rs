@@ -392,21 +392,6 @@ where
         }
     }
 
-    /// Advances the cursor and returns traversed items as a tree.
-    pub fn slice<Target>(&mut self, end: &Target, bias: Bias, arena: &mut Arena<T>) -> SumTree<T>
-    where
-        Target: Comparable<D>,
-        T::Summary: Min,
-    {
-        let mut slice = SliceSeekAggregate {
-            tree: SumTree::new(arena),
-            leaf_items: ArrayVec::new(),
-            leaf_summary: Min::MIN,
-        };
-        self.seek_internal(end, bias, &mut slice, arena);
-        slice.tree
-    }
-
     pub fn suffix(mut self, arena: &mut Arena<T>) -> SumTree<T> {
         let suffix = self.slice(&End, Bias::Right, arena);
         debug_assert!(self.stack.is_empty());
@@ -436,16 +421,16 @@ where
         }
     }
 
-    /// Returns whether we found the item you were seeking for
-    #[track_caller]
-    fn seek_internal(
-        &mut self,
-        target: &impl Comparable<D>,
-        bias: Bias,
-        aggregate: &mut SliceSeekAggregate<T>,
-        arena: &mut Arena<T>,
-    ) {
-        assert!(
+    /// Advances the cursor and returns traversed items as a tree.
+    pub fn slice<Target>(&mut self, target: &Target, bias: Bias, arena: &mut Arena<T>) -> SumTree<T>
+    where
+        Target: Comparable<D>,
+    {
+        let mut output = SumTree::new(arena);
+        let mut leaf_items = ArrayVec::new();
+        let mut leaf_summary = Min::MIN;
+
+        debug_assert!(
             target.compare(&self.position) >= Ordering::Equal,
             "cannot seek backward",
         );
@@ -465,8 +450,9 @@ where
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
+                            output = output.append(child_trees.next().unwrap(), arena);
+
                             self.position = child_end;
-                            aggregate.push_tree(child_trees.next().unwrap(), arena);
                             entry.position = self.position;
                         } else {
                             let node = arena.remove(child_trees.next().unwrap());
@@ -482,22 +468,28 @@ where
                 StackEntryNode::Leaf { items } => {
                     while let Some(item) = items.as_slice().first() {
                         let summary = item.summary();
-
                         let child_end = self.position + summary;
 
                         let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
+                            leaf_items.push(items.next().unwrap());
+                            leaf_summary = leaf_summary + summary;
+
                             self.position = child_end;
-                            aggregate.push_item(items.next().unwrap(), summary);
                         } else {
-                            aggregate.end_leaf(arena);
+                            let items = mem::take(&mut leaf_items);
+                            output = output
+                                .append(arena.alloc(leaf_summary, Node::Leaf { items }), arena);
+
                             break 'outer;
                         }
                     }
 
-                    aggregate.end_leaf(arena);
+                    let items = mem::take(&mut leaf_items);
+                    output = output.append(arena.alloc(leaf_summary, Node::Leaf { items }), arena);
+                    leaf_summary = Min::MIN;
                 }
             }
 
@@ -506,38 +498,8 @@ where
         }
 
         debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().node.is_leaf());
-    }
-}
 
-struct SliceSeekAggregate<T: Item> {
-    tree: SumTree<T>,
-    leaf_items: ArrayVec<T, { 2 * TREE_BASE }>,
-    leaf_summary: T::Summary,
-}
-
-impl<T: Item> SliceSeekAggregate<T>
-where
-    T::Summary: Min + Copy + Add<Output = T::Summary>,
-{
-    fn end_leaf(&mut self, arena: &mut Arena<T>) {
-        let summary = mem::replace(&mut self.leaf_summary, Min::MIN);
-        let leaf = arena.alloc(
-            summary,
-            Node::Leaf {
-                items: mem::take(&mut self.leaf_items),
-            },
-        );
-
-        replace_with::replace_with_or_abort(&mut self.tree, |tree| tree.append(leaf, arena));
-    }
-
-    fn push_item(&mut self, item: T, summary: T::Summary) {
-        self.leaf_items.push(item);
-        self.leaf_summary = self.leaf_summary + summary;
-    }
-
-    fn push_tree(&mut self, tree: SumTree<T>, arena: &mut Arena<T>) {
-        replace_with::replace_with_or_abort(&mut self.tree, |agg| agg.append(tree, arena));
+        output
     }
 }
 

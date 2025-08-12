@@ -4,7 +4,7 @@ use arrayvec::ArrayVec;
 pub use cursor::Cursor;
 use get_size2::GetSize;
 use slotmap::SlotMap;
-use std::fmt::Debug;
+use std::num::NonZeroU8;
 use std::ops::{Add, Deref, DerefMut};
 use std::{fmt, iter::FromIterator};
 
@@ -50,8 +50,7 @@ impl<T: Item> Arena<T> {
 
     pub fn reset(&mut self, tree: &mut SumTree<T>)
     where
-        T: std::fmt::Debug,
-        T::Summary: Min + std::fmt::Debug + Copy + Add<Output = T::Summary>,
+        T::Summary: Min,
     {
         if cfg!(debug_assertions) {
             tree.summary = Min::MIN;
@@ -65,26 +64,6 @@ impl<T: Item> Arena<T> {
             if let Node::Internal { child_trees, .. } = node {
                 child_trees.into_iter().for_each(|tree| self.drop(tree));
             }
-
-            // for (k, v) in self.0.iter() {
-            //     if k != tree.node {
-            //         let summary = match v {
-            //             Node::Internal { child_trees, .. } => {
-            //                 sum(child_trees.iter().map(|t| t.summary))
-            //             }
-            //             Node::Leaf { items } => sum(items.iter().map(|item| item.summary())),
-            //         };
-            //         eprintln!(
-            //             "memory leak detected: {:#?}",
-            //             &NodeRef {
-            //                 arena: self,
-            //                 node: k,
-            //                 summary,
-            //             }
-            //         );
-            //     }
-            // }
-            assert_eq!(self.0.len(), 1);
         } else {
             self.clear();
             *tree = SumTree::new(self);
@@ -100,9 +79,45 @@ impl<T: Item> Arena<T> {
         }
     }
 
-    // pub fn is_empty(&self) -> bool {
-    //     self.0.is_empty()
-    // }
+    #[cfg(test)]
+    pub fn assert_reachability(&self, tree: &SumTree<T>)
+    where
+        T: std::fmt::Debug,
+        T::Summary: Min + std::fmt::Debug + Copy + Add<Output = T::Summary>,
+    {
+        if cfg!(debug_assertions) {
+            let mut tracker = slotmap::SecondaryMap::with_capacity(self.0.len());
+            for (k, _) in self.0.iter() {
+                tracker.insert(k, ());
+            }
+            self.walk_reachability(tree, &mut tracker);
+            let nodes: Vec<NodeRef<'_, T>> = tracker
+                .into_iter()
+                .map(|(node, ())| NodeRef {
+                    node,
+                    arena: self,
+                    summary: self.0.get(node).unwrap().summary(),
+                })
+                .collect();
+            assert!(nodes.is_empty(), "unreachable nodes found: {nodes:?}");
+        }
+    }
+
+    #[cfg(test)]
+    fn walk_reachability(&self, tree: &SumTree<T>, tracker: &mut slotmap::SecondaryMap<NodeKey, ()>)
+    where
+        T::Summary: Copy,
+    {
+        tracker.remove(tree.node);
+        match tree.get(self).into() {
+            Node::Internal { child_trees, .. } => {
+                child_trees
+                    .into_iter()
+                    .for_each(|tree| self.walk_reachability(tree, tracker));
+            }
+            Node::Leaf { .. } => {}
+        }
+    }
 
     pub fn clear(&mut self) {
         self.0.clear();
@@ -203,6 +218,7 @@ where
     T::Summary: fmt::Debug + Copy,
 {
     pub fn fmt(&self, f: &mut fmt::Formatter, arena: &Arena<T>) -> fmt::Result {
+        use fmt::Debug;
         self.get(arena).fmt(f)
     }
 }
@@ -308,7 +324,7 @@ impl<T: Item> SumTree<T> {
     where
         T::Summary: Min + Copy + Add<Output = T::Summary>,
     {
-        let height = left.get(arena).height() + 1;
+        let height = NonZeroU8::new(left.get(arena).height() + 1).unwrap();
         let summary = sum([left.summary, right.summary]);
 
         let mut child_trees = ArrayVec::new();
@@ -404,10 +420,8 @@ impl<T: Item> SumTree<T> {
         }
 
         if self.get(arena).height() < other.get(arena).height() {
-            for tree in arena.remove(other).into_child_trees() {
-                self = self.append(tree, arena);
-            }
-            self
+            let children = arena.remove(other).into_child_trees();
+            children.into_iter().fold(self, |l, r| l.append(r, arena))
         } else if let Some(split_tree) = self.push_tree_recursive(other, arena) {
             Self::from_child_trees(self, split_tree, arena)
         } else {
@@ -426,7 +440,7 @@ impl<T: Item> SumTree<T> {
                 height,
                 mut child_trees,
             } => {
-                let height_delta = height - other.get(arena).height();
+                let height_delta = height.get() - other.get(arena).height();
                 let mut trees_to_append = ArrayVec::<SumTree<T>, { 2 * TREE_BASE }>::new();
                 if height_delta == 0 {
                     let Node::Internal { child_trees, .. } = arena.remove(other) else {
@@ -564,7 +578,7 @@ impl<T: Item> DerefMut for NodeMut<'_, T> {
 
 enum Node<T: Item> {
     Internal {
-        height: u8,
+        height: NonZeroU8,
         child_trees: ArrayVec<SumTree<T>, { 2 * TREE_BASE }>,
     },
     Leaf {
@@ -624,26 +638,21 @@ impl<T: Item> Node<T> {
 
     fn height(&self) -> u8 {
         match self {
-            Node::Internal { height, .. } => *height,
+            Node::Internal { height, .. } => height.get(),
             Node::Leaf { .. } => 0,
         }
     }
 
-    // fn summary(&self) -> &T::Summary {
-    //     match self {
-    //         Node::Internal { summary, .. } => summary,
-    //         Node::Leaf { summary, .. } => summary,
-    //     }
-    // }
-
-    // fn child_summaries(&self) -> &[T::Summary] {
-    //     match self {
-    //         Node::Internal {
-    //             child_summaries, ..
-    //         } => child_summaries.as_slice(),
-    //         Node::Leaf { item_summaries, .. } => item_summaries.as_slice(),
-    //     }
-    // }
+    #[cfg(test)]
+    fn summary(&self) -> T::Summary
+    where
+        T::Summary: Copy + Add<Output = T::Summary> + Min,
+    {
+        match self {
+            Node::Internal { child_trees, .. } => sum(child_trees.iter().map(|t| t.summary)),
+            Node::Leaf { items } => sum(items.iter().map(|item| item.summary())),
+        }
+    }
 
     fn into_child_trees(self) -> ArrayVec<SumTree<T>, { 2 * TREE_BASE }> {
         match self {
@@ -660,19 +669,13 @@ impl<T: Item> Node<T> {
         }
     }
 
-    // fn into_items(self) -> ArrayVec<T, { 2 * TREE_BASE }> {
-    //     match self {
-    //         Node::Leaf { items, .. } => items,
-    //         Node::Internal { .. } => panic!("Internal nodes have no items"),
-    //     }
-    // }
-
     fn items(&self) -> &ArrayVec<T, { 2 * TREE_BASE }> {
         match self {
             Node::Leaf { items, .. } => items,
             Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
+
     fn items_mut(&mut self) -> &mut ArrayVec<T, { 2 * TREE_BASE }> {
         match self {
             Node::Leaf { items, .. } => items,
@@ -700,7 +703,7 @@ where
 mod tests {
     use super::*;
     use equivalent::{Comparable, Equivalent};
-    use rand::{distributions, prelude::*};
+    use rand::{distr, prelude::*};
     use std::cmp;
 
     #[test]
@@ -749,19 +752,19 @@ mod tests {
 
             let rng = &mut rng;
             let mut tree = SumTree::<u8>::new(&mut arena);
-            let count = rng.gen_range(0..10);
+            let count = rng.random_range(0..10);
             tree = tree.extend(
-                rng.sample_iter(distributions::Standard).take(count),
+                rng.sample_iter(distr::StandardUniform).take(count),
                 &mut arena,
             );
 
             for _ in 0..num_operations {
-                let splice_end = rng.gen_range(0..tree.extent::<Count>().0 + 1);
-                let splice_start = rng.gen_range(0..splice_end + 1);
-                let count = rng.gen_range(0..10);
+                let splice_end = rng.random_range(0..tree.extent::<Count>().0 + 1);
+                let splice_start = rng.random_range(0..splice_end + 1);
+                let count = rng.random_range(0..10);
                 let tree_end = tree.extent::<Count>();
                 let new_items = rng
-                    .sample_iter(distributions::Standard)
+                    .sample_iter(distr::StandardUniform)
                     .take(count)
                     .collect::<Vec<u8>>();
 
@@ -784,9 +787,9 @@ mod tests {
 
                 let mut before_start = false;
                 let mut cursor = tree.cursor::<Count>(&arena);
-                let start_pos = rng.gen_range(0..=reference_items.len());
+                let start_pos = rng.random_range(0..=reference_items.len());
                 cursor.seek_forward(&Count(start_pos), Bias::Right, &arena);
-                let mut pos = rng.gen_range(start_pos..=reference_items.len());
+                let mut pos = rng.random_range(start_pos..=reference_items.len());
                 cursor.seek_forward(&Count(pos), Bias::Right, &arena);
 
                 for i in 0..10 {
@@ -829,10 +832,10 @@ mod tests {
             }
 
             // for _ in 0..10 {
-            //     let end = rng.gen_range(0..tree.extent::<Count>().0 + 1);
-            //     let start = rng.gen_range(0..end + 1);
-            //     let start_bias = if rng.r#gen() { Bias::Left } else { Bias::Right };
-            //     let end_bias = if rng.r#gen() { Bias::Left } else { Bias::Right };
+            //     let end = rng.random_range(0..tree.extent::<Count>().0 + 1);
+            //     let start = rng.random_range(0..end + 1);
+            //     let start_bias = if rng.r#random() { Bias::Left } else { Bias::Right };
+            //     let end_bias = if rng.r#random() { Bias::Left } else { Bias::Right };
 
             //     let mut cursor = tree.cursor::<Count>();
             //     cursor.seek(&Count(start), start_bias, &arena);
