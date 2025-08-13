@@ -2,6 +2,7 @@ mod cursor;
 
 use arrayvec::ArrayVec;
 pub use cursor::Cursor;
+use equivalent::{Comparable, Equivalent};
 use get_size2::GetSize;
 use slotmap::SlotMap;
 use std::num::NonZeroU8;
@@ -285,17 +286,11 @@ impl<T: Item> SumTree<T> {
         IntoCursor::new(self, arena)
     }
 
-    #[allow(dead_code)]
     pub fn first<'a>(&'a self, arena: &'a Arena<T>) -> Option<&'a T>
     where
         T::Summary: Copy,
     {
         self.leftmost_leaf(arena).into().items().first()
-    }
-
-    #[allow(dead_code)]
-    pub fn first_mut<'a>(&'a mut self, arena: &'a mut Arena<T>) -> Option<&'a mut T> {
-        self.leftmost_leaf_mut(arena).into().items_mut().first_mut()
     }
 
     // pub fn last(&self) -> Option<&T> {
@@ -351,20 +346,6 @@ impl<T: Item> SumTree<T> {
         }
     }
 
-    fn leftmost_leaf_mut<'a>(&mut self, arena: &'a mut Arena<T>) -> NodeMut<'a, T> {
-        let mut this = self.get_mut(arena);
-        match &mut *this {
-            Node::Leaf { .. } => this,
-            Node::Internal { child_trees, .. } => {
-                let SumTree { node, .. } = *child_trees.first_mut().unwrap();
-                NodeMut {
-                    arena: this.arena,
-                    node,
-                }
-            }
-        }
-    }
-
     // fn rightmost_leaf(&self) -> &Self {
     //     match *self.0 {
     //         Node::Leaf { .. } => self,
@@ -395,14 +376,26 @@ impl<T: Item> SumTree<T> {
         I: IntoIterator<Item = T>,
         T::Summary: Min + Copy + Add<Output = T::Summary>,
     {
-        iter.into_iter().fold(self, |this, i| this.push(i, arena))
+        let tree = iter
+            .into_iter()
+            .fold(SumTree::new(arena), |tree, i| tree.push(i, arena));
+        self.append(tree, arena)
     }
 
-    pub fn push(self, item: T, arena: &mut Arena<T>) -> Self
+    pub fn push(mut self, item: T, arena: &mut Arena<T>) -> Self
     where
         T::Summary: Min + Copy + Add<Output = T::Summary>,
     {
-        self.append(Self::from_item(item, arena), arena)
+        if self.is_empty(arena) {
+            arena.remove(self);
+            return Self::from_item(item, arena);
+        }
+
+        if let Some(split_tree) = self.push_item_recursive(item, arena) {
+            Self::from_child_trees(self, split_tree, arena)
+        } else {
+            self
+        }
     }
 
     pub fn append(mut self, other: Self, arena: &mut Arena<T>) -> Self
@@ -522,6 +515,88 @@ impl<T: Item> SumTree<T> {
                     ))
                 } else {
                     items.extend(other_items);
+
+                    *self = arena.alloc(summary, Node::Leaf { items });
+
+                    None
+                }
+            }
+        }
+    }
+
+    fn push_item_recursive(&mut self, item: T, arena: &mut Arena<T>) -> Option<SumTree<T>>
+    where
+        T::Summary: Min + Copy + Add<Output = T::Summary>,
+    {
+        let summary = self.summary + item.summary();
+
+        match arena.0.remove(self.node).unwrap() {
+            Node::Internal {
+                height,
+                mut child_trees,
+            } => {
+                let tree_to_append = child_trees
+                    .last_mut()
+                    .unwrap()
+                    .push_item_recursive(item, arena);
+
+                let child_count = child_trees.len() + tree_to_append.is_some() as usize;
+                if child_count > 2 * TREE_BASE {
+                    let midpoint = (child_count + child_count % 2) / 2;
+
+                    let right_trees: ArrayVec<_, { 2 * TREE_BASE }> = child_trees
+                        .drain(midpoint..)
+                        .chain(tree_to_append)
+                        .collect();
+
+                    *self = arena.alloc(
+                        sum(child_trees.iter().map(|tree| tree.summary)),
+                        Node::Internal {
+                            height,
+                            child_trees,
+                        },
+                    );
+                    Some(arena.alloc(
+                        sum(right_trees.iter().map(|tree| tree.summary)),
+                        Node::Internal {
+                            height,
+                            child_trees: right_trees,
+                        },
+                    ))
+                } else {
+                    child_trees.extend(tree_to_append);
+
+                    *self = arena.alloc(
+                        summary,
+                        Node::Internal {
+                            height,
+                            child_trees,
+                        },
+                    );
+                    None
+                }
+            }
+            Node::Leaf { mut items } => {
+                let child_count = items.len() + 1;
+                if child_count > 2 * TREE_BASE {
+                    let midpoint = (child_count + child_count % 2) / 2;
+
+                    let right_items: ArrayVec<T, { 2 * TREE_BASE }> = items
+                        .drain(midpoint..)
+                        .chain(std::iter::once(item))
+                        .collect();
+
+                    *self = arena.alloc(
+                        sum(items.iter().map(|item| item.summary())),
+                        Node::Leaf { items },
+                    );
+
+                    Some(arena.alloc(
+                        sum(right_items.iter().map(|item| item.summary())),
+                        Node::Leaf { items: right_items },
+                    ))
+                } else {
+                    items.push(item);
 
                     *self = arena.alloc(summary, Node::Leaf { items });
 
@@ -676,13 +751,6 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn items_mut(&mut self) -> &mut ArrayVec<T, { 2 * TREE_BASE }> {
-        match self {
-            Node::Leaf { items, .. } => items,
-            Node::Internal { .. } => panic!("Internal nodes have no items"),
-        }
-    }
-
     fn is_underflowing(&self) -> bool {
         match self {
             Node::Internal { child_trees, .. } => child_trees.len() < TREE_BASE,
@@ -697,6 +765,20 @@ where
     I: IntoIterator<Item = T>,
 {
     iter.into_iter().fold(T::MIN, |sum, value| sum + value)
+}
+
+pub struct End;
+
+impl<D> Equivalent<D> for End {
+    fn equivalent(&self, _: &D) -> bool {
+        false
+    }
+}
+
+impl<D> Comparable<D> for End {
+    fn compare(&self, _: &D) -> std::cmp::Ordering {
+        std::cmp::Ordering::Greater
+    }
 }
 
 #[cfg(test)]

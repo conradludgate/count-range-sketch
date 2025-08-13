@@ -13,6 +13,12 @@ equivalent = "1"
 [dev-dependencies]
 rand = "0.9"
 proptest = "1.7.0"
+criterion = "0.7"
+foldhash = "0.1"
 
 [profile.release]
 debug-assertions = true
+
+[[bench]]
+name = "count"
+harness = false

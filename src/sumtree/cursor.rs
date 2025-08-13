@@ -1,7 +1,10 @@
-use super::*;
 use arrayvec::ArrayVec;
-use equivalent::{Comparable, Equivalent};
-use std::{cmp::Ordering, mem};
+use equivalent::Comparable;
+use std::{cmp::Ordering, fmt, mem, ops::Add};
+
+#[cfg(test)]
+use crate::sumtree::NodeRef;
+use crate::sumtree::{Arena, Bias, Empty, End, Item, Min, Node, SumTree, TREE_BASE};
 
 #[derive(Clone)]
 struct StackEntry<'a, T: Item, D> {
@@ -84,7 +87,6 @@ where
     // }
 
     /// Item is None, when the list is empty, or this cursor is at the end of the list.
-    #[track_caller]
     pub fn item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
@@ -104,7 +106,6 @@ where
     }
 
     #[cfg(test)]
-    #[track_caller]
     pub fn next_item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
@@ -128,7 +129,6 @@ where
     }
 
     #[cfg(test)]
-    #[track_caller]
     fn next_leaf(&self, arena: &'a Arena<T>) -> Option<NodeRef<'a, T>> {
         for entry in self.stack.iter().rev().skip(1) {
             if entry.index < entry.tree.get(arena).into().child_trees().len() - 1 {
@@ -143,12 +143,10 @@ where
         None
     }
 
-    #[track_caller]
     pub fn next<'b: 'a>(&mut self, arena: &'b Arena<T>) {
         self.search_forward(|_| true, arena)
     }
 
-    #[track_caller]
     pub fn search_forward<'b: 'a, F>(&mut self, mut filter_node: F, arena: &'b Arena<T>)
     where
         F: FnMut(T::Summary) -> bool,
@@ -244,7 +242,6 @@ where
     }
 
     #[cfg(test)]
-    #[track_caller]
     pub fn seek<Target>(&mut self, pos: &Target, bias: Bias, arena: &'a Arena<T>)
     where
         Target: Comparable<D>,
@@ -253,15 +250,29 @@ where
         self.seek_forward(pos, bias, arena)
     }
 
-    #[track_caller]
     pub fn seek_forward<Target>(&mut self, target: &Target, bias: Bias, arena: &'a Arena<T>)
     where
         Target: Comparable<D>,
+    {
+        self.summary::<Target, Empty>(target, bias, arena);
+    }
+
+    pub fn summary<Target, Output>(
+        &mut self,
+        target: &Target,
+        bias: Bias,
+        arena: &'a Arena<T>,
+    ) -> Output
+    where
+        Target: Comparable<D>,
+        Output: Add<T::Summary, Output = Output> + Min + Copy,
     {
         assert!(
             target.compare(&self.position) >= Ordering::Equal,
             "cannot seek backward",
         );
+
+        let mut output = Output::MIN;
 
         if !self.did_seek {
             self.did_seek = true;
@@ -288,8 +299,11 @@ where
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
-                            self.position = child_end;
                             entry.index += 1;
+
+                            output = output + child.summary;
+
+                            self.position = child_end;
                             entry.position = self.position;
                         } else {
                             self.stack.push(StackEntry {
@@ -304,14 +318,18 @@ where
                 }
                 Node::Leaf { items } => {
                     for item in &items[entry.index..] {
-                        let child_end = self.position + item.summary();
+                        let item_summary = item.summary();
+                        let child_end = self.position + item_summary;
 
                         let comparison = target.compare(&child_end);
                         if comparison == Ordering::Greater
                             || (comparison == Ordering::Equal && bias == Bias::Right)
                         {
-                            self.position = child_end;
                             entry.index += 1;
+
+                            output = output + item_summary;
+
+                            self.position = child_end;
                         } else {
                             break 'outer;
                         }
@@ -327,6 +345,8 @@ where
         debug_assert!(
             self.stack.is_empty() || self.stack.last().unwrap().tree.get(arena).is_leaf()
         );
+
+        output
     }
 }
 
@@ -500,19 +520,5 @@ where
         debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().node.is_leaf());
 
         output
-    }
-}
-
-struct End;
-
-impl<D> Equivalent<D> for End {
-    fn equivalent(&self, _: &D) -> bool {
-        false
-    }
-}
-
-impl<D> Comparable<D> for End {
-    fn compare(&self, _: &D) -> Ordering {
-        Ordering::Greater
     }
 }

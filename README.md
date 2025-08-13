@@ -16,30 +16,57 @@ sketch.count(1);
 
 sketch.count(2);
 sketch.count(2);
-sketch.count(2);
 
 sketch.count(3);
-sketch.count(3);
 
-sketch.count(4);
+sketch.count(5);
+sketch.count(5);
+sketch.count(5);
 
 // All counts are as precise as they can be
-assert_eq!(sketch.get_count(1), (1..=1, 4));
-assert_eq!(sketch.get_count(2), (2..=2, 3));
-assert_eq!(sketch.get_count(3), (3..=3, 2));
-assert_eq!(sketch.get_count(4), (4..=4, 1));
-assert_eq!(sketch.full(), (1..=4, 10));
+assert_eq!(sketch.get(1..=1), (1..=1, 4));
+assert_eq!(sketch.get(2..=2), (2..=2, 2));
+assert_eq!(sketch.get(3..=3), (3..=3, 1));
+assert_eq!(sketch.get(4..=4), (4..=4, 0));
+assert_eq!(sketch.get(5..=5), (5..=5, 3));
+
+// we can request different ranges
+assert_eq!(sketch.get(..3), (1..=2, 6));
+assert_eq!(sketch.get(3..), (3..=5, 4));
+assert_eq!(sketch.get(..), (1..=5, 10));
 
 assert_eq!(sketch.len(), 4);
+// get all the occupied ranges
+assert_eq!(
+    sketch.get_all(), 
+    vec![
+        (1..=1, 4),
+        (2..=2, 2),
+        (3..=3, 1),
+        (5..=5, 3),
+    ],
+);
 
 // The counts will merge when exceeding the limit.
-sketch.count(5);
-assert_eq!(sketch.get_count(1), (1..=1, 4));
-assert_eq!(sketch.get_count(2), (2..=2, 3));
-assert_eq!(sketch.get_count(3), (3..=5, 4));
-assert_eq!(sketch.get_count(4), (3..=5, 4));
-assert_eq!(sketch.get_count(5), (3..=5, 4));
-assert_eq!(sketch.full(), (1..=5, 11));
+sketch.count(4);
+assert_eq!(sketch.get(1..=1), (1..=1, 4));
+assert_eq!(sketch.get(2..=2), (2..=2, 2));
+assert_eq!(sketch.get(3..=3), (3..=5, 5));
+assert_eq!(sketch.get(4..=4), (3..=5, 5));
+assert_eq!(sketch.get(5..=5), (3..=5, 5));
+
+assert_eq!(sketch.get(..3), (1..=2, 6));
+assert_eq!(sketch.get(3..), (3..=5, 5));
+assert_eq!(sketch.get(..), (1..=5, 11));
 
 assert_eq!(sketch.len(), 3);
+// get all the occupied ranges
+assert_eq!(
+    sketch.get_all(), 
+    vec![
+        (1..=1, 4),
+        (2..=2, 2),
+        (3..=5, 5),
+    ],
+);
 ```

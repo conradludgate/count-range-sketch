@@ -5,13 +5,19 @@ mod sumtree;
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops::{Add, RangeInclusive},
+    ops::{Add, RangeBounds, RangeInclusive},
 };
 
 use get_size2::GetSize;
-
-pub use sumtree::Min;
 use sumtree::{Arena, Bias, Item, SumTree};
+
+/// A type that has a minimum value.
+pub trait Min: Ord {
+    /// The minimum value for the type.
+    ///
+    /// Invariant: `T::MIN <= t` must be true for all `t`.
+    const MIN: Self;
+}
 
 #[derive(Clone, Copy)]
 struct RangeCount<T> {
@@ -75,7 +81,7 @@ impl<T: Copy> Item for RangeCount<T> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Key<K>(K);
 
-impl<K: Min> Min for Key<K> {
+impl<K: Min> sumtree::Min for Key<K> {
     const MIN: Self = Self(K::MIN);
 }
 
@@ -92,7 +98,7 @@ impl<K> Add<CountSummary<K>> for Key<K> {
     }
 }
 
-impl<T: Min> Min for CountSummary<T> {
+impl<T: Min> sumtree::Min for CountSummary<T> {
     const MIN: Self = CountSummary {
         end: T::MIN,
         count: 0,
@@ -145,7 +151,7 @@ impl<T: fmt::Debug + Copy> fmt::Debug for CountRangeSketch<T> {
     }
 }
 
-impl<T: Min + Copy + Ord> CountRangeSketch<T> {
+impl<T: Min + Copy> CountRangeSketch<T> {
     pub fn new(limit: usize) -> Self {
         let mut arena = Arena::default();
         CountRangeSketch {
@@ -189,26 +195,64 @@ impl<T: Min + Copy + Ord> CountRangeSketch<T> {
             new_tree.append(cursor.suffix(arena), arena)
         });
 
-        while self.tree.summary.entries > self.limit {
+        if self.tree.summary.entries > self.limit {
+            // compact to 75% of the current size to amortise the compaction cost.
+            let new_limit = (self.limit * 3).div_ceil(4);
             replace_with::replace_with_or_abort(&mut self.tree, |tree| {
-                compact(tree, self.limit * 3 / 4, arena)
+                compact(tree, new_limit, arena)
             });
+            debug_assert!(self.len() <= new_limit);
         }
 
         output
     }
 
-    pub fn get_count(&mut self, t: T) -> (RangeInclusive<T>, usize) {
-        let mut cursor = self.tree.cursor::<Key<T>>(&self.arena);
-        cursor.seek_forward(&Key(t), Bias::Left, &self.arena);
+    /// Return the number of occurences for the smallest range that fully contains the requested range.
+    pub fn get(&self, range: impl RangeBounds<T>) -> (RangeInclusive<T>, usize) {
+        let arena = &self.arena;
+        let mut cursor = self.tree.cursor::<Key<T>>(arena);
 
-        if let Some(item) = cursor.item(&self.arena)
-            && t >= item.start
+        let (start_bound, start_inclusive) = match range.start_bound() {
+            std::ops::Bound::Included(x) => (*x, true),
+            std::ops::Bound::Excluded(x) => (*x, false),
+            std::ops::Bound::Unbounded => (T::MIN, true),
+        };
+
+        let (end_bound, end_inclusive) = match range.end_bound() {
+            std::ops::Bound::Included(x) => (*x, true),
+            std::ops::Bound::Excluded(x) => (*x, false),
+            std::ops::Bound::Unbounded => (self.tree.summary.end, true),
+        };
+
+        cursor.seek_forward(&Key(start_bound), Bias::Left, arena);
+        if !start_inclusive
+            && let Some(&start) = cursor.item(arena)
+            && start_bound == start.end
         {
-            (item.start..=item.end, item.count)
-        } else {
-            (t..=t, 0)
+            // skip.
+            cursor.next(arena);
         }
+
+        let Some(&start) = cursor.item(arena) else {
+            return (start_bound..=end_bound, 0);
+        };
+
+        if end_bound < start.start || (!end_inclusive && end_bound == start.start) {
+            return (start_bound..=end_bound, 0);
+        }
+
+        let mut summary: CountSummary<T> = cursor.summary(&Key(end_bound), Bias::Left, arena);
+
+        if let Some(end) = cursor.item(arena) {
+            match std::cmp::Ord::cmp(&end.start, &end_bound) {
+                std::cmp::Ordering::Greater => {}
+                std::cmp::Ordering::Equal if !end_inclusive => {}
+                // The next item overlaps with our requested range.
+                _ => summary = summary + end.summary(),
+            }
+        }
+
+        (start.start..=summary.end, summary.count)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -217,15 +261,6 @@ impl<T: Min + Copy + Ord> CountRangeSketch<T> {
 
     pub fn len(&self) -> usize {
         self.tree.summary.entries
-    }
-
-    pub fn full(&self) -> (RangeInclusive<T>, usize) {
-        let CountSummary { count, end, .. } = self.tree.summary;
-        let start = self
-            .tree
-            .first(&self.arena)
-            .map_or(T::MIN, |item| item.start);
-        (start..=end, count)
     }
 
     pub fn get_all(&self) -> Vec<(RangeInclusive<T>, usize)> {
@@ -299,7 +334,7 @@ fn mid_count_range<T: Copy + Min>(
 
     cursor
         .item(arena)
-        .map_or(CountSummary::MIN, |item| item.summary())
+        .map_or(sumtree::Min::MIN, |item| item.summary())
 }
 
 impl Min for u64 {
@@ -349,12 +384,12 @@ mod tests {
         }
 
         for n in RANGE {
-            let (range, count) = sketch.get_count(n);
+            let (range, count) = sketch.get(n..=n);
             let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
             assert_eq!(actual_count, count);
         }
 
-        let (range, count) = sketch.full();
+        let (range, count) = sketch.get(..);
         assert_eq!(count, s.len());
 
         let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
@@ -376,12 +411,12 @@ mod tests {
         }
 
         for n in RANGE {
-            let (range, count) = sketch.get_count(n);
+            let (range, count) = sketch.get(n..=n);
             let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
             assert_eq!(actual_count, count);
         }
 
-        let (range, count) = sketch.full();
+        let (range, count) = sketch.get(..);
         assert_eq!(count, s.len());
 
         let actual_count: usize = actual.range(range).map(|(_, v)| *v).sum();
@@ -458,5 +493,57 @@ mod tests {
     limit: 20,
 }";
         assert_eq!(format!("{sketch:#?}"), expected);
+    }
+
+    #[test]
+    fn ranges() {
+        let mut sketch = CountRangeSketch::new(4);
+
+        sketch.count(1);
+        sketch.count(1);
+        sketch.count(1);
+        sketch.count(1);
+
+        sketch.count(2);
+        sketch.count(2);
+        sketch.count(2);
+
+        sketch.count(3);
+        sketch.count(3);
+
+        sketch.count(5);
+
+        // All counts are as precise as they can be
+        assert_eq!(sketch.get(1..=1), (1..=1, 4));
+        assert_eq!(sketch.get(2..=2), (2..=2, 3));
+        assert_eq!(sketch.get(3..=3), (3..=3, 2));
+        assert_eq!(sketch.get(4..=4), (4..=4, 0));
+        assert_eq!(sketch.get(5..=5), (5..=5, 1));
+
+        // we can request different ranges
+        assert_eq!(sketch.get(..3), (1..=2, 7));
+        assert_eq!(sketch.get(3..), (3..=5, 3));
+        assert_eq!(
+            sketch.get((std::ops::Bound::Excluded(1), std::ops::Bound::Included(3),)),
+            (2..=3, 5)
+        );
+        assert_eq!(sketch.get(..), (1..=5, 10));
+
+        assert_eq!(sketch.len(), 4);
+
+        // The counts will merge when exceeding the limit.
+        sketch.count(4);
+        assert_eq!(sketch.get(1..=1), (1..=1, 4));
+        assert_eq!(sketch.get(2..=2), (2..=2, 3));
+        assert_eq!(sketch.get(3..=3), (3..=5, 4));
+        assert_eq!(sketch.get(4..=4), (3..=5, 4));
+        assert_eq!(sketch.get(5..=5), (3..=5, 4));
+
+        assert_eq!(sketch.get(..3), (1..=2, 7));
+        assert_eq!(sketch.get(3..), (3..=5, 4));
+        assert_eq!(sketch.get(2..4), (2..=5, 7));
+        assert_eq!(sketch.get(..), (1..=5, 11));
+
+        assert_eq!(sketch.len(), 3);
     }
 }
