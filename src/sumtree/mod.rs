@@ -5,6 +5,7 @@ pub use cursor::Cursor;
 use equivalent::{Comparable, Equivalent};
 use get_size2::GetSize;
 use slotmap::SlotMap;
+use std::mem::needs_drop;
 use std::ops::{Add, Deref, DerefMut};
 use std::{fmt, iter::FromIterator};
 
@@ -52,8 +53,9 @@ impl<T: Item> Arena<T> {
     where
         T::Summary: Min,
     {
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) || needs_drop::<T>() || needs_drop::<T::Summary>() {
             tree.inner.summary = Min::MIN;
+            let height = tree.height;
 
             let node = std::mem::replace(
                 tree.inner.get_mut(self).into(),
@@ -64,7 +66,7 @@ impl<T: Item> Arena<T> {
             if let Node::Internal { child_trees, .. } = node {
                 child_trees
                     .into_iter()
-                    .for_each(|tree| self.drop_inner(tree));
+                    .for_each(|tree| self.drop_inner(tree, height - 1));
             }
         } else {
             self.clear();
@@ -73,17 +75,18 @@ impl<T: Item> Arena<T> {
     }
 
     pub fn drop(&mut self, sumtree: SumTree<T>) {
-        self.drop_inner(sumtree.inner);
+        self.drop_inner(sumtree.inner, sumtree.height)
     }
 
-    fn drop_inner(&mut self, sumtree: InnerSumTree<T>) {
+    fn drop_inner(&mut self, sumtree: InnerSumTree<T>, height: u8) {
         match self.remove(sumtree) {
-            Node::Internal { child_trees, .. } => {
-                child_trees
-                    .into_iter()
-                    .for_each(|tree| self.drop_inner(tree));
+            Node::Internal { child_trees } => child_trees
+                .into_iter()
+                .for_each(|tree| self.drop_inner(tree, height - 1)),
+            Node::Leaf { items } => {
+                drop(items);
+                debug_assert_eq!(height, 0)
             }
-            Node::Leaf { .. } => {}
         }
     }
 
@@ -306,7 +309,10 @@ impl<T: Item> SumTree<T> {
     where
         T::Summary: Copy,
     {
-        self.inner.leftmost_leaf(arena).into().items().first()
+        let Node::Leaf { items } = self.inner.leftmost_leaf(arena).into() else {
+            unreachable!()
+        };
+        items.first()
     }
 
     // pub fn last(&self) -> Option<&T> {
@@ -398,7 +404,7 @@ impl<T: Item> SumTree<T> {
             return Self::from_item(item, arena);
         }
 
-        if let Some(split_tree) = self.inner.push_item_recursive(item, arena) {
+        if let Some(split_tree) = self.inner.push_item_recursive(self.height, item, arena) {
             Self::from_child_trees(self, split_tree, arena)
         } else {
             self
@@ -420,9 +426,12 @@ impl<T: Item> SumTree<T> {
         }
 
         if self.height < other.height {
-            let children = arena.remove(other.inner).into_child_trees();
+            let Node::Internal { child_trees } = arena.remove(other.inner) else {
+                unreachable!()
+            };
+
             let height = other.height - 1;
-            children
+            child_trees
                 .into_iter()
                 .fold(self, |l, inner| l.append(SumTree { inner, height }, arena))
         } else if let Some(split_tree) = self.inner.push_tree_recursive(self.height, other, arena) {
@@ -481,6 +490,8 @@ impl<T: Item> InnerSumTree<T> {
 
         match arena.0.remove(self.node).unwrap() {
             Node::Internal { mut child_trees } => {
+                debug_assert!(height > 0);
+
                 let height_delta = height - other_height;
                 let mut trees_to_append = ArrayVec::<InnerSumTree<T>, { 2 * TREE_BASE }>::new();
                 if height_delta == 0 {
@@ -535,6 +546,8 @@ impl<T: Item> InnerSumTree<T> {
                 }
             }
             Node::Leaf { mut items } => {
+                debug_assert_eq!(height, 0);
+
                 let Node::Leaf { items: other_items } = arena.remove(other) else {
                     unreachable!()
                 };
@@ -568,7 +581,12 @@ impl<T: Item> InnerSumTree<T> {
         }
     }
 
-    fn push_item_recursive(&mut self, item: T, arena: &mut Arena<T>) -> Option<InnerSumTree<T>>
+    fn push_item_recursive(
+        &mut self,
+        height: u8,
+        item: T,
+        arena: &mut Arena<T>,
+    ) -> Option<InnerSumTree<T>>
     where
         T::Summary: Min + Copy + Add<Output = T::Summary>,
     {
@@ -576,10 +594,13 @@ impl<T: Item> InnerSumTree<T> {
 
         match arena.0.remove(self.node).unwrap() {
             Node::Internal { mut child_trees } => {
-                let tree_to_append = child_trees
-                    .last_mut()
-                    .unwrap()
-                    .push_item_recursive(item, arena);
+                debug_assert!(height > 0);
+
+                let tree_to_append =
+                    child_trees
+                        .last_mut()
+                        .unwrap()
+                        .push_item_recursive(height - 1, item, arena);
 
                 let child_count = child_trees.len() + tree_to_append.is_some() as usize;
                 if child_count > 2 * TREE_BASE {
@@ -608,6 +629,8 @@ impl<T: Item> InnerSumTree<T> {
                 }
             }
             Node::Leaf { mut items } => {
+                debug_assert_eq!(height, 0);
+
                 let child_count = items.len() + 1;
                 if child_count > 2 * TREE_BASE {
                     let midpoint = (child_count + child_count % 2) / 2;
@@ -744,28 +767,6 @@ impl<T: Item> Node<T> {
         match self {
             Node::Internal { child_trees, .. } => sum(child_trees.iter().map(|t| t.summary)),
             Node::Leaf { items } => sum(items.iter().map(|item| item.summary())),
-        }
-    }
-
-    fn into_child_trees(self) -> ArrayVec<InnerSumTree<T>, { 2 * TREE_BASE }> {
-        match self {
-            Node::Internal { child_trees, .. } => child_trees,
-            Node::Leaf { .. } => panic!("Leaf nodes have no child trees"),
-        }
-    }
-
-    #[cfg(test)]
-    fn child_trees(&self) -> &ArrayVec<InnerSumTree<T>, { 2 * TREE_BASE }> {
-        match self {
-            Node::Internal { child_trees, .. } => child_trees,
-            Node::Leaf { .. } => panic!("Leaf nodes have no child trees"),
-        }
-    }
-
-    fn items(&self) -> &ArrayVec<T, { 2 * TREE_BASE }> {
-        match self {
-            Node::Leaf { items, .. } => items,
-            Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
 

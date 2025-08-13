@@ -43,7 +43,7 @@ impl<T: fmt::Debug> fmt::Debug for RangeCount<T> {
 
 #[derive(Clone, Copy)]
 struct CountSummary<T> {
-    entries: usize,
+    len: usize,
     count: usize,
     min_count: usize,
     end: T,
@@ -57,10 +57,10 @@ impl<T: GetSize> GetSize for CountSummary<T> {
 
 impl<T: fmt::Debug> fmt::Debug for CountSummary<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut f = f.debug_struct("CountSummary");
-        f.field("range", &(..=&self.end));
-        f.field("count", &self.count)
-            .field("len", &self.entries)
+        f.debug_struct("CountSummary")
+            .field("range", &(..=&self.end))
+            .field("count", &self.count)
+            .field("len", &self.len)
             .finish()
     }
 }
@@ -73,7 +73,7 @@ impl<T: Copy> Item for RangeCount<T> {
             end: self.end,
             count: self.count,
             min_count: self.count,
-            entries: 1,
+            len: 1,
         }
     }
 }
@@ -103,7 +103,7 @@ impl<T: Min> sumtree::Min for CountSummary<T> {
         end: T::MIN,
         count: 0,
         min_count: usize::MAX,
-        entries: 0,
+        len: 0,
     };
 }
 
@@ -112,7 +112,7 @@ impl<T: Min> Add for CountSummary<T> {
 
     fn add(self, rhs: Self) -> Self::Output {
         Self {
-            entries: self.entries + rhs.entries,
+            len: self.len + rhs.len,
             count: self.count + rhs.count,
             min_count: std::cmp::min(self.min_count, rhs.min_count),
             end: rhs.end,
@@ -195,7 +195,7 @@ impl<T: Min + Copy> CountRangeSketch<T> {
             new_tree.append(cursor.suffix(arena), arena)
         });
 
-        if self.tree.summary().entries > self.limit {
+        if self.tree.summary().len > self.limit {
             // compact to 75% of the current size to amortise the compaction cost.
             let new_limit = (self.limit * 3).div_ceil(4);
             replace_with::replace_with_or_abort(&mut self.tree, |tree| {
@@ -260,7 +260,7 @@ impl<T: Min + Copy> CountRangeSketch<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.tree.summary().entries
+        self.tree.summary().len
     }
 
     pub fn get_all(&self) -> Vec<(RangeInclusive<T>, usize)> {
@@ -277,7 +277,7 @@ fn compact<T: Copy + Min + Ord>(
     limit: usize,
     arena: &mut Arena<RangeCount<T>>,
 ) -> SumTree<RangeCount<T>> {
-    if tree.summary().entries <= limit {
+    if tree.summary().len <= limit {
         return tree;
     }
 
@@ -293,7 +293,7 @@ fn compact<T: Copy + Min + Ord>(
     let mut cursor = tree.into_cursor::<Key<T>>(arena);
     let mut left = cursor.slice(&Key(midpoint.end), Bias::Left, arena);
 
-    if left.summary().entries == 0 {
+    if left.summary().len == 0 {
         arena.drop(left);
         let left_item = cursor.next(arena).unwrap();
         let right = compact(cursor.suffix(arena), limit - 1, arena);
@@ -303,10 +303,10 @@ fn compact<T: Copy + Min + Ord>(
     let left_limit = limit.div_ceil(2);
     left = compact(left, left_limit, arena);
 
-    let right_limit = limit.saturating_sub(left.summary().entries);
+    let right_limit = limit.saturating_sub(left.summary().len);
     let right = compact(cursor.suffix(arena), right_limit, arena);
 
-    let left_limit = limit.saturating_sub(right.summary().entries);
+    let left_limit = limit.saturating_sub(right.summary().len);
     left = compact(left, left_limit, arena);
 
     left.append(right, arena)

@@ -94,17 +94,22 @@ where
     pub fn next_item(&self, arena: &'a Arena<T>) -> Option<&'a T> {
         self.assert_did_seek();
         if let Some(entry) = self.stack.last() {
-            if entry.index == entry.tree.get(arena).items().len() - 1 {
+            let Node::Leaf { items } = entry.tree.get(arena).into() else {
+                unreachable!()
+            };
+
+            if entry.index == items.len() - 1 {
                 if let Some(next_leaf) = self.next_leaf(arena) {
-                    Some(next_leaf.into().items().first().unwrap())
+                    let Node::Leaf { items } = next_leaf.into() else {
+                        unreachable!()
+                    };
+
+                    Some(items.first().unwrap())
                 } else {
                     None
                 }
             } else {
-                match *entry.tree.get(arena).into() {
-                    Node::Leaf { ref items, .. } => Some(&items[entry.index + 1]),
-                    _ => unreachable!(),
-                }
+                Some(&items[entry.index + 1])
             }
         } else if self.at_end {
             None
@@ -116,13 +121,12 @@ where
     #[cfg(test)]
     fn next_leaf(&self, arena: &'a Arena<T>) -> Option<NodeRef<'a, T>> {
         for entry in self.stack.iter().rev().skip(1) {
-            if entry.index < entry.tree.get(arena).into().child_trees().len() - 1 {
-                match *entry.tree.get(arena).into() {
-                    Node::Internal {
-                        ref child_trees, ..
-                    } => return Some(child_trees[entry.index + 1].leftmost_leaf(arena)),
-                    Node::Leaf { .. } => unreachable!(),
-                };
+            let Node::Internal { child_trees } = entry.tree.get(arena).into() else {
+                unreachable!()
+            };
+
+            if entry.index < child_trees.len() - 1 {
+                return Some(child_trees[entry.index + 1].leftmost_leaf(arena));
             }
         }
         None
