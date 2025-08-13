@@ -195,7 +195,7 @@ impl<T: Min + Copy> CountRangeSketch<T> {
             new_tree.append(cursor.suffix(arena), arena)
         });
 
-        if self.tree.summary.entries > self.limit {
+        if self.tree.summary().entries > self.limit {
             // compact to 75% of the current size to amortise the compaction cost.
             let new_limit = (self.limit * 3).div_ceil(4);
             replace_with::replace_with_or_abort(&mut self.tree, |tree| {
@@ -221,7 +221,7 @@ impl<T: Min + Copy> CountRangeSketch<T> {
         let (end_bound, end_inclusive) = match range.end_bound() {
             std::ops::Bound::Included(x) => (*x, true),
             std::ops::Bound::Excluded(x) => (*x, false),
-            std::ops::Bound::Unbounded => (self.tree.summary.end, true),
+            std::ops::Bound::Unbounded => (self.tree.summary().end, true),
         };
 
         cursor.seek_forward(&Key(start_bound), Bias::Left, arena);
@@ -260,7 +260,7 @@ impl<T: Min + Copy> CountRangeSketch<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.tree.summary.entries
+        self.tree.summary().entries
     }
 
     pub fn get_all(&self) -> Vec<(RangeInclusive<T>, usize)> {
@@ -277,12 +277,12 @@ fn compact<T: Copy + Min + Ord>(
     limit: usize,
     arena: &mut Arena<RangeCount<T>>,
 ) -> SumTree<RangeCount<T>> {
-    if tree.summary.entries <= limit {
+    if tree.summary().entries <= limit {
         return tree;
     }
 
     if limit <= 1 {
-        let CountSummary { count, end, .. } = tree.summary;
+        let CountSummary { count, end, .. } = *tree.summary();
         let start = tree.first(arena).unwrap().start;
         arena.drop(tree);
         return SumTree::from_item(RangeCount { count, start, end }, arena);
@@ -293,7 +293,7 @@ fn compact<T: Copy + Min + Ord>(
     let mut cursor = tree.into_cursor::<Key<T>>(arena);
     let mut left = cursor.slice(&Key(midpoint.end), Bias::Left, arena);
 
-    if left.summary.entries == 0 {
+    if left.summary().entries == 0 {
         arena.drop(left);
         let left_item = cursor.next(arena).unwrap();
         let right = compact(cursor.suffix(arena), limit - 1, arena);
@@ -303,10 +303,10 @@ fn compact<T: Copy + Min + Ord>(
     let left_limit = limit.div_ceil(2);
     left = compact(left, left_limit, arena);
 
-    let right_limit = limit.saturating_sub(left.summary.entries);
+    let right_limit = limit.saturating_sub(left.summary().entries);
     let right = compact(cursor.suffix(arena), right_limit, arena);
 
-    let left_limit = limit.saturating_sub(right.summary.entries);
+    let left_limit = limit.saturating_sub(right.summary().entries);
     left = compact(left, left_limit, arena);
 
     left.append(right, arena)
@@ -316,7 +316,7 @@ fn mid_count_range<T: Copy + Min>(
     tree: &SumTree<RangeCount<T>>,
     arena: &Arena<RangeCount<T>>,
 ) -> CountSummary<T> {
-    let summary = tree.summary;
+    let summary = *tree.summary();
     let mut cursor = tree.cursor::<CountSummary<T>>(arena);
 
     let mut search = 0;
@@ -454,7 +454,6 @@ mod tests {
             count: 17,
             len: 6,
         },
-        height: 1,
         children: [
             Leaf {
                 items: [

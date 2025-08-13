@@ -1,14 +1,14 @@
 use arrayvec::ArrayVec;
 use equivalent::Comparable;
-use std::{cmp::Ordering, fmt, num::NonZeroU8, ops::Add};
+use std::{cmp::Ordering, fmt, ops::Add};
 
 #[cfg(test)]
 use crate::sumtree::NodeRef;
-use crate::sumtree::{Arena, Bias, Empty, End, Item, Min, Node, SumTree, TREE_BASE};
+use crate::sumtree::{Arena, Bias, Empty, End, InnerSumTree, Item, Min, Node, SumTree, TREE_BASE};
 
 #[derive(Clone)]
 struct StackEntry<'a, T: Item, D> {
-    tree: &'a SumTree<T>,
+    tree: &'a InnerSumTree<T>,
     index: usize,
     position: D,
 }
@@ -141,7 +141,7 @@ where
         if self.stack.is_empty() {
             if !self.at_end {
                 self.stack.push(StackEntry {
-                    tree: self.tree,
+                    tree: &self.tree.inner,
                     index: 0,
                     position: D::MIN,
                 });
@@ -262,7 +262,7 @@ where
         if !self.did_seek {
             self.did_seek = true;
             self.stack.push(StackEntry {
-                tree: self.tree,
+                tree: &self.tree.inner,
                 index: 0,
                 position: D::MIN,
             });
@@ -340,8 +340,7 @@ enum StackEntryNode<T: Item, D> {
         items: arrayvec::IntoIter<T, { 2 * TREE_BASE }>,
     },
     Internal {
-        height: NonZeroU8,
-        child_trees: arrayvec::IntoIter<SumTree<T>, { 2 * TREE_BASE }>,
+        child_trees: arrayvec::IntoIter<InnerSumTree<T>, { 2 * TREE_BASE }>,
         position: D,
     },
 }
@@ -355,12 +354,8 @@ impl<T: Item, D> StackEntryNode<T, D> {
 impl<T: Item> Node<T> {
     fn into_pos<D>(self, position: D) -> StackEntryNode<T, D> {
         match self {
-            Node::Internal {
-                child_trees,
-                height,
-            } => StackEntryNode::Internal {
+            Node::Internal { child_trees } => StackEntryNode::Internal {
                 child_trees: child_trees.into_iter(),
-                height,
                 position,
             },
             Node::Leaf { items } => StackEntryNode::Leaf {
@@ -371,6 +366,7 @@ impl<T: Item> Node<T> {
 }
 
 pub struct IntoCursor<T: Item, D> {
+    height: u8,
     stack: ArrayVec<StackEntryNode<T, D>, 16>,
     position: D,
 }
@@ -383,7 +379,8 @@ where
 {
     pub fn new(tree: SumTree<T>, arena: &mut Arena<T>) -> Self {
         Self {
-            stack: ArrayVec::from_iter([arena.remove(tree).into_pos(D::MIN)]),
+            height: tree.height,
+            stack: ArrayVec::from_iter([arena.remove(tree.inner).into_pos(D::MIN)]),
             position: D::MIN,
         }
     }
@@ -430,7 +427,6 @@ where
         'outer: while let Some(entry) = self.stack.last_mut() {
             match entry {
                 StackEntryNode::Internal {
-                    height,
                     child_trees,
                     position,
                 } => {
@@ -454,15 +450,21 @@ where
                     if i > 0 {
                         *position = self.position;
                         let node = Node::Internal {
-                            height: *height,
                             child_trees: child_trees.by_ref().take(i).collect(),
                         };
-                        output = output.append(arena.alloc(node.summary(), node), arena);
+                        output = output.append(
+                            SumTree {
+                                inner: arena.alloc(node.summary(), node),
+                                height: self.height,
+                            },
+                            arena,
+                        );
                     }
 
                     if let Some(child) = child_trees.next() {
                         let node = arena.remove(child);
                         self.stack.push(node.into_pos(self.position));
+                        self.height -= 1;
                         ascending = false;
                         continue 'outer;
                     }
@@ -485,7 +487,13 @@ where
                         let node = Node::Leaf {
                             items: items.by_ref().take(i).collect(),
                         };
-                        output = output.append(arena.alloc(node.summary(), node), arena);
+                        output = output.append(
+                            SumTree {
+                                inner: arena.alloc(node.summary(), node),
+                                height: self.height,
+                            },
+                            arena,
+                        );
                     }
 
                     if items.len() != 0 {
@@ -495,6 +503,7 @@ where
             }
 
             self.stack.pop();
+            self.height += 1;
             ascending = true;
         }
 
