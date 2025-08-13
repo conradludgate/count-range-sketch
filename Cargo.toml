@@ -19,6 +19,9 @@ foldhash = "0.1"
 [profile.release]
 debug-assertions = true
 
+[profile.bench]
+debug-assertions = false
+
 [[bench]]
 name = "count"
 harness = false

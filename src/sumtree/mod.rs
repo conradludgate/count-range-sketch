@@ -718,7 +718,6 @@ impl<T: Item> Node<T> {
         }
     }
 
-    #[cfg(test)]
     fn summary(&self) -> T::Summary
     where
         T::Summary: Copy + Add<Output = T::Summary> + Min,

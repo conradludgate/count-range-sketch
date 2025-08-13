@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
 use equivalent::Comparable;
-use std::{cmp::Ordering, fmt, mem, ops::Add};
+use std::{cmp::Ordering, fmt, num::NonZeroU8, ops::Add};
 
 #[cfg(test)]
 use crate::sumtree::NodeRef;
@@ -29,21 +29,6 @@ pub struct Cursor<'a, T: Item, D> {
     did_seek: bool,
     at_end: bool,
 }
-
-// impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for Cursor<'_, T, D>
-// where
-//     T::Summary: fmt::Debug,
-// {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         f.debug_struct("Cursor")
-//             .field("tree", &self.tree)
-//             .field("stack", &self.stack)
-//             .field("position", &self.position)
-//             .field("did_seek", &self.did_seek)
-//             .field("at_end", &self.at_end)
-//             .finish()
-//     }
-// }
 
 impl<'a, T, D> Cursor<'a, T, D>
 where
@@ -350,31 +335,33 @@ where
     }
 }
 
-struct StackEntryOwned<T: Item, D> {
-    node: StackEntryNode<T>,
-    position: D,
-}
-
-enum StackEntryNode<T: Item> {
+enum StackEntryNode<T: Item, D> {
     Leaf {
         items: arrayvec::IntoIter<T, { 2 * TREE_BASE }>,
     },
     Internal {
+        height: NonZeroU8,
         child_trees: arrayvec::IntoIter<SumTree<T>, { 2 * TREE_BASE }>,
+        position: D,
     },
 }
 
-impl<T: Item> StackEntryNode<T> {
+impl<T: Item, D> StackEntryNode<T, D> {
     fn is_leaf(&self) -> bool {
         matches!(self, Self::Leaf { .. })
     }
 }
 
-impl<T: Item> From<Node<T>> for StackEntryNode<T> {
-    fn from(node: Node<T>) -> Self {
-        match node {
-            Node::Internal { child_trees, .. } => StackEntryNode::Internal {
+impl<T: Item> Node<T> {
+    fn into_pos<D>(self, position: D) -> StackEntryNode<T, D> {
+        match self {
+            Node::Internal {
+                child_trees,
+                height,
+            } => StackEntryNode::Internal {
                 child_trees: child_trees.into_iter(),
+                height,
+                position,
             },
             Node::Leaf { items } => StackEntryNode::Leaf {
                 items: items.into_iter(),
@@ -383,16 +370,8 @@ impl<T: Item> From<Node<T>> for StackEntryNode<T> {
     }
 }
 
-impl<T: Item + fmt::Debug, D: fmt::Debug> fmt::Debug for StackEntryOwned<T, D> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StackEntryOwned")
-            .field("position", &self.position)
-            .finish()
-    }
-}
-
 pub struct IntoCursor<T: Item, D> {
-    stack: ArrayVec<StackEntryOwned<T, D>, 16>,
+    stack: ArrayVec<StackEntryNode<T, D>, 16>,
     position: D,
 }
 
@@ -404,10 +383,7 @@ where
 {
     pub fn new(tree: SumTree<T>, arena: &mut Arena<T>) -> Self {
         Self {
-            stack: ArrayVec::from_iter([StackEntryOwned {
-                node: arena.remove(tree).into(),
-                position: D::MIN,
-            }]),
+            stack: ArrayVec::from_iter([arena.remove(tree).into_pos(D::MIN)]),
             position: D::MIN,
         }
     }
@@ -423,13 +399,10 @@ where
             let Some(entry) = self.stack.last_mut() else {
                 break None;
             };
-            match &mut entry.node {
+            match entry {
                 StackEntryNode::Internal { child_trees, .. } => {
                     let node = arena.remove(child_trees.next().unwrap());
-                    self.stack.push(StackEntryOwned {
-                        node: node.into(),
-                        position: self.position,
-                    });
+                    self.stack.push(node.into_pos(self.position));
                 }
                 StackEntryNode::Leaf { items } => {
                     let item = items.next()?;
@@ -447,8 +420,6 @@ where
         Target: Comparable<D>,
     {
         let mut output = SumTree::new(arena);
-        let mut leaf_items = ArrayVec::new();
-        let mut leaf_summary = Min::MIN;
 
         debug_assert!(
             target.compare(&self.position) >= Ordering::Equal,
@@ -457,59 +428,69 @@ where
 
         let mut ascending = false;
         'outer: while let Some(entry) = self.stack.last_mut() {
-            match &mut entry.node {
-                StackEntryNode::Internal { child_trees } => {
+            match entry {
+                StackEntryNode::Internal {
+                    height,
+                    child_trees,
+                    position,
+                } => {
                     if ascending {
-                        entry.position = self.position;
+                        *position = self.position;
                     }
 
-                    while let Some(child) = child_trees.as_slice().first() {
-                        let child_end = self.position + child.summary;
-
-                        let comparison = target.compare(&child_end);
-                        if comparison == Ordering::Greater
-                            || (comparison == Ordering::Equal && bias == Bias::Right)
-                        {
-                            output = output.append(child_trees.next().unwrap(), arena);
-
-                            self.position = child_end;
-                            entry.position = self.position;
-                        } else {
-                            let node = arena.remove(child_trees.next().unwrap());
-                            self.stack.push(StackEntryOwned {
-                                node: node.into(),
-                                position: self.position,
-                            });
-                            ascending = false;
-                            continue 'outer;
+                    let mut i = 0;
+                    for child in child_trees.as_slice() {
+                        let end = self.position + child.summary;
+                        match target.compare(&end) {
+                            Ordering::Less => break,
+                            Ordering::Equal if bias == Bias::Left => break,
+                            _ => {}
                         }
+
+                        i += 1;
+                        self.position = end;
+                    }
+
+                    if i > 0 {
+                        *position = self.position;
+                        let node = Node::Internal {
+                            height: *height,
+                            child_trees: child_trees.by_ref().take(i).collect(),
+                        };
+                        output = output.append(arena.alloc(node.summary(), node), arena);
+                    }
+
+                    if let Some(child) = child_trees.next() {
+                        let node = arena.remove(child);
+                        self.stack.push(node.into_pos(self.position));
+                        ascending = false;
+                        continue 'outer;
                     }
                 }
                 StackEntryNode::Leaf { items } => {
-                    while let Some(item) = items.as_slice().first() {
-                        let summary = item.summary();
-                        let child_end = self.position + summary;
-
-                        let comparison = target.compare(&child_end);
-                        if comparison == Ordering::Greater
-                            || (comparison == Ordering::Equal && bias == Bias::Right)
-                        {
-                            leaf_items.push(items.next().unwrap());
-                            leaf_summary = leaf_summary + summary;
-
-                            self.position = child_end;
-                        } else {
-                            let items = mem::take(&mut leaf_items);
-                            output = output
-                                .append(arena.alloc(leaf_summary, Node::Leaf { items }), arena);
-
-                            break 'outer;
+                    let mut i = 0;
+                    for item in items.as_slice() {
+                        let end = self.position + item.summary();
+                        match target.compare(&end) {
+                            Ordering::Less => break,
+                            Ordering::Equal if bias == Bias::Left => break,
+                            _ => {}
                         }
+
+                        i += 1;
+                        self.position = end;
                     }
 
-                    let items = mem::take(&mut leaf_items);
-                    output = output.append(arena.alloc(leaf_summary, Node::Leaf { items }), arena);
-                    leaf_summary = Min::MIN;
+                    if i > 0 {
+                        let node = Node::Leaf {
+                            items: items.by_ref().take(i).collect(),
+                        };
+                        output = output.append(arena.alloc(node.summary(), node), arena);
+                    }
+
+                    if items.len() != 0 {
+                        break 'outer;
+                    }
                 }
             }
 
@@ -517,7 +498,7 @@ where
             ascending = true;
         }
 
-        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().node.is_leaf());
+        debug_assert!(self.stack.is_empty() || self.stack.last().unwrap().is_leaf());
 
         output
     }

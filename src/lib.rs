@@ -470,14 +470,14 @@ mod tests {
                         range: 3..=3,
                         count: 4,
                     },
-                ],
-            },
-            Leaf {
-                items: [
                     RangeCount {
                         range: 4..=4,
                         count: 4,
                     },
+                ],
+            },
+            Leaf {
+                items: [
                     RangeCount {
                         range: 5..=5,
                         count: 3,
